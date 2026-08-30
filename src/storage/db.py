@@ -1,0 +1,156 @@
+"""
+Local SQLite storage layer.
+
+This is the working store for a single-node run of the pipeline. It is
+NOT the architecture recommended for 500k+ scale / multi-node crawling
+(see architecture.pdf for the Postgres + Redis-backed design) -- it's
+the pragmatic, dependency-light store for this trial, with a schema
+that mirrors the same "seen_urls" / entity dedup concepts the
+production design uses, so the migration path is mostly "swap the
+connection", not "redesign the logic".
+
+Responsibilities:
+  - Persist validated records (Startup / Product / ResearchPaper / Job /
+    News) as JSON blobs alongside indexed columns used for dedup.
+  - Track `seen_urls` for the freshness/dedup logic in utils.dates.
+  - Persist the entity mapping log (raw -> canonical) for the
+    "Entity Mapping Log" deliverable tab.
+"""
+from __future__ import annotations
+
+import json
+import sqlite3
+from contextlib import contextmanager
+from datetime import datetime
+from pathlib import Path
+from typing import Iterable, Iterator, Optional
+
+SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS seen_urls (
+    url TEXT PRIMARY KEY,
+    content_hash TEXT,
+    seen_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_seen_urls_hash ON seen_urls(content_hash);
+
+CREATE TABLE IF NOT EXISTS records (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    record_type TEXT NOT NULL,          -- STARTUP | PRODUCT | RESEARCH_PAPER | JOB | NEWS
+    dedup_key TEXT NOT NULL,            -- e.g. source.url, or paper_url
+    payload_json TEXT NOT NULL,
+    collected_at TEXT NOT NULL,
+    UNIQUE(record_type, dedup_key)
+);
+CREATE INDEX IF NOT EXISTS idx_records_type ON records(record_type);
+
+CREATE TABLE IF NOT EXISTS entity_mapping_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    raw_name TEXT NOT NULL,
+    canonical_name TEXT,
+    match_score REAL NOT NULL,
+    match_method TEXT NOT NULL,
+    source_url TEXT NOT NULL,
+    resolved_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS run_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    phase TEXT NOT NULL,                -- e.g. "research_papers", "startups"
+    event TEXT NOT NULL,                -- e.g. "started", "completed", "error"
+    detail TEXT,
+    ts TEXT NOT NULL
+);
+"""
+
+
+class PipelineDB:
+    def __init__(self, path: str = "data/pipeline.sqlite3"):
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        self.path = path
+        self.conn = sqlite3.connect(path)
+        self.conn.execute("PRAGMA journal_mode=WAL;")  # allows concurrent readers during writes
+        self.conn.executescript(SCHEMA_SQL)
+        self.conn.commit()
+
+    def close(self):
+        self.conn.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.close()
+
+    # -- seen URLs -----------------------------------------------------
+
+    def mark_seen(self, url: str, content_hash: Optional[str] = None) -> None:
+        self.conn.execute(
+            "INSERT OR IGNORE INTO seen_urls (url, content_hash, seen_at) VALUES (?, ?, ?)",
+            (url, content_hash, datetime.utcnow().isoformat()),
+        )
+        self.conn.commit()
+
+    def is_seen(self, url: str) -> bool:
+        cur = self.conn.execute("SELECT 1 FROM seen_urls WHERE url = ? LIMIT 1", (url,))
+        return cur.fetchone() is not None
+
+    def is_seen_hash(self, content_hash: str) -> bool:
+        cur = self.conn.execute("SELECT 1 FROM seen_urls WHERE content_hash = ? LIMIT 1", (content_hash,))
+        return cur.fetchone() is not None
+
+    # -- records ---------------------------------------------------------
+
+    def upsert_record(self, record_type: str, dedup_key: str, payload: dict) -> bool:
+        """
+        Insert a record, ignoring (not overwriting) on dedup_key collision.
+        Returns True if this was a new row, False if it was a duplicate.
+        `payload` must already be a JSON-serializable dict (e.g. via
+        Pydantic's `.model_dump(mode="json")`).
+        """
+        cur = self.conn.execute(
+            "INSERT OR IGNORE INTO records (record_type, dedup_key, payload_json, collected_at) "
+            "VALUES (?, ?, ?, ?)",
+            (record_type, dedup_key, json.dumps(payload, default=str), datetime.utcnow().isoformat()),
+        )
+        self.conn.commit()
+        return cur.rowcount > 0
+
+    def count(self, record_type: str) -> int:
+        cur = self.conn.execute("SELECT COUNT(*) FROM records WHERE record_type = ?", (record_type,))
+        return cur.fetchone()[0]
+
+    def iter_records(self, record_type: str) -> Iterator[dict]:
+        cur = self.conn.execute(
+            "SELECT payload_json FROM records WHERE record_type = ? ORDER BY id", (record_type,)
+        )
+        for (payload_json,) in cur:
+            yield json.loads(payload_json)
+
+    # -- entity mapping log ----------------------------------------------
+
+    def log_entity_mapping(self, raw_name: str, canonical_name: Optional[str], match_score: float,
+                            match_method: str, source_url: str) -> None:
+        self.conn.execute(
+            "INSERT INTO entity_mapping_log (raw_name, canonical_name, match_score, match_method, "
+            "source_url, resolved_at) VALUES (?, ?, ?, ?, ?, ?)",
+            (raw_name, canonical_name, match_score, match_method, source_url, datetime.utcnow().isoformat()),
+        )
+        self.conn.commit()
+
+    def iter_entity_mapping_log(self) -> Iterator[dict]:
+        cur = self.conn.execute(
+            "SELECT raw_name, canonical_name, match_score, match_method, source_url, resolved_at "
+            "FROM entity_mapping_log ORDER BY id"
+        )
+        cols = ["raw_name", "canonical_name", "match_score", "match_method", "source_url", "resolved_at"]
+        for row in cur:
+            yield dict(zip(cols, row))
+
+    # -- run log -----------------------------------------------------------
+
+    def log_event(self, phase: str, event: str, detail: str = "") -> None:
+        self.conn.execute(
+            "INSERT INTO run_log (phase, event, detail, ts) VALUES (?, ?, ?, ?)",
+            (phase, event, detail, datetime.utcnow().isoformat()),
+        )
+        self.conn.commit()
