@@ -1,0 +1,11 @@
+1. Scale Strategy (500,000+ Records)
+To scale ingestion to hundreds of thousands of records without manual intervention, the architecture transitions from local asynchronous execution to a distributed worker model. Target sources are partitioned and placed into a central message queue (e.g., AWS SQS or Redis). Containerized crawler nodes independently consume these tasks, allowing seamless horizontal scaling. The SQLite local database is migrated to PostgreSQL to handle concurrent, high-throughput writes from multiple workers.
+
+2. Handling 413s & 429s
+Rate limits (429 Too Many Requests) are managed via an intelligent multi-tier LLM fallback chain (Gemini Flash -> Groq Llama 3 -> DeepSeek) paired with exponential backoff and jitter to prevent thundering herd problems. Context window overflows (413 Payload Too Large) are preempted by a token-aware structural chunking mechanism that identifies paragraph boundaries and strips HTML boilerplate before routing text to the LLM. If a 413 still occurs, the system dynamically rechunks and retries in place.
+
+3. Freshness Tracking Across Distributed Nodes
+To guarantee zero double-processing across distributed crawlers, the local SeenUrlStore is elevated to a shared Redis SET. When a crawler extracts a URL, it attempts an atomic SADD operation. If the URL already exists, the item is instantly dropped. For sources lacking reliable timestamps, this mechanism acts as an intelligent heuristic fallback, layered on top of strict 24-hour ISO-8601 date parsing.
+
+4. Storage Strategy
+PostgreSQL is chosen as the primary database due to its ACID compliance, JSONB support for semi-structured data, and robust handling of high-concurrency inserts. For mapping complex multi-dimensional relationships (e.g., a Founder linked to a Startup, which is linked to a Product and an AI Job), Neo4j is utilized as the graph storage layer. Graph architecture is vastly superior to relational tables for traversing deep entity networks and calculating dynamic resolution scores.
