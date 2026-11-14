@@ -177,6 +177,13 @@ class NewsRecord(BaseModel):
     content: NewsContent
     collectedAt: datetime = Field(default_factory=utc_now)
 
+    @field_validator("recordType")
+    @classmethod
+    def lock_record_type(cls, v: str) -> str:
+        if v != "NEWS":
+            raise ValueError("recordType must be 'NEWS'")
+        return v
+
 
 # ---------------------------------------------------------------------------
 # Entity mapping log (raw -> canonical), for the "Entity Mapping Log" tab

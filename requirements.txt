@@ -1,15 +1,23 @@
-httpx[http2]==0.27.2
-aiohttp==3.10.10
-pydantic==2.9.2
-litellm==1.51.3
-playwright==1.48.0
-playwright-stealth==1.0.6
-dateparser==1.2.0
-rapidfuzz==3.10.1
-gspread==6.1.4
-google-auth==2.35.0
-tenacity==9.0.0
-tiktoken==0.8.0
-python-dotenv==1.0.1
-feedparser==6.0.11
-uvloop==0.21.0; sys_platform != "win32"
+# Pinned to versions verified together on 2026-11-14 (Python 3.12).
+# The previous pins could no longer be installed: litellm==1.51.3 has been
+# removed from PyPI.
+httpx[http2]==0.28.1
+aiohttp==3.14.5
+pydantic==2.14.3
+litellm==1.109.1
+playwright==1.65.2
+playwright-stealth==2.0.3
+dateparser==1.5.0
+rapidfuzz==3.14.6
+gspread==6.2.1
+google-auth==2.62.2
+tenacity==9.2.1
+tiktoken==0.14.0
+python-dotenv==1.2.4
+feedparser==6.0.14
+loguru==0.8.0
+# Uses the operating system's certificate store for HTTPS. Needed on machines
+# where antivirus/corporate proxies re-sign TLS traffic (otherwise every API
+# call fails with CERTIFICATE_VERIFY_FAILED); harmless elsewhere.
+truststore==0.10.5
+uvloop==0.23.0; sys_platform != "win32"

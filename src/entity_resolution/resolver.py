@@ -33,6 +33,15 @@ except ImportError:  # pragma: no cover - graceful degrade for sandbox/testing
 
 FUZZY_MATCH_THRESHOLD = 88.0  # 0-100 scale; conservative to avoid false merges
 
+# Seed names/aliases that are also everyday words. They still resolve when a
+# scraper hands over a company name, but find_mentions() ignores them in
+# free text, where "Scale" or "Together" usually aren't the company.
+AMBIGUOUS_MENTIONS = {
+    "Scale", "Writer", "Notion", "Gamma", "Together", "Lambda", "Glean", "Cursor",
+    "Modular", "Contextual", "Inflection", "Adept", "Sierra", "Harvey", "Runway",
+    "Luma", "Pika", "Jasper", "Imbue", "Perplexity", "Mistral", "Pinecone", "Snorkel",
+}
+
 _LEGAL_SUFFIXES = re.compile(
     r"(?i)\b(inc\.?|incorporated|corp\.?|corporation|co\.?|llc\.?|ltd\.?|"
     r"limited|plc\.?|gmbh|s\.?a\.?|pte\.?\s*ltd\.?)\s*$"
@@ -85,6 +94,7 @@ class EntityResolver:
     _normalized_index: Dict[str, str] = field(default_factory=dict, init=False, repr=False)
     _canonical_norm_list: List[tuple] = field(default_factory=list, init=False, repr=False)
     _dynamic_aliases: Dict[str, str] = field(default_factory=dict, init=False, repr=False)
+    _mention_patterns: List[tuple] = field(default_factory=list, init=False, repr=False)
 
     def __post_init__(self):
         self._rebuild_index()
@@ -92,12 +102,37 @@ class EntityResolver:
     def _rebuild_index(self):
         self._normalized_index = {}
         self._canonical_norm_list = []
+        self._mention_patterns = []
         for canonical, aliases in self.seed_entities.items():
             canon_norm = normalize_name(canonical)
             self._normalized_index[canon_norm] = canonical
+            # Fuzzy candidates include aliases, not just canonical names
+            # ("Eleven Labz" should land near the alias "Eleven Labs").
             self._canonical_norm_list.append((canon_norm, canonical))
             for alias in aliases:
-                self._normalized_index[normalize_name(alias)] = canonical
+                alias_norm = normalize_name(alias)
+                self._normalized_index[alias_norm] = canonical
+                if alias_norm and alias_norm != canon_norm:
+                    self._canonical_norm_list.append((alias_norm, canonical))
+            for surface in [canonical, *aliases]:
+                if surface in AMBIGUOUS_MENTIONS:
+                    continue
+                self._mention_patterns.append(
+                    (re.compile(r"(?<!\w)" + re.escape(surface) + r"(?!\w)"), canonical)
+                )
+
+    def find_mentions(self, text: str) -> List[str]:
+        """
+        Canonical names of known entities mentioned in free text (e.g. a news
+        article). Case-sensitive, whole-word matches on canonical names and
+        aliases, skipping names that are ordinary English words ("Scale",
+        "Writer", "Notion"...), which would produce false positives. Precision
+        over recall, consistent with the resolver's no-guessing rule.
+        """
+        if not text:
+            return []
+        found = {canonical for pattern, canonical in self._mention_patterns if pattern.search(text)}
+        return sorted(found)
 
     def add_canonical_entity(self, canonical_name: str, aliases: Optional[List[str]] = None) -> None:
         """Dynamically register a new canonical entity discovered at runtime

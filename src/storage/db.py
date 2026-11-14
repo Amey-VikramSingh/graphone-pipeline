@@ -21,7 +21,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, Iterator, Optional
 
@@ -63,6 +63,10 @@ CREATE TABLE IF NOT EXISTS run_log (
 """
 
 
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
 class PipelineDB:
     def __init__(self, path: str = "data/pipeline.sqlite3"):
         Path(path).parent.mkdir(parents=True, exist_ok=True)
@@ -86,7 +90,7 @@ class PipelineDB:
     def mark_seen(self, url: str, content_hash: Optional[str] = None) -> None:
         self.conn.execute(
             "INSERT OR IGNORE INTO seen_urls (url, content_hash, seen_at) VALUES (?, ?, ?)",
-            (url, content_hash, datetime.utcnow().isoformat()),
+            (url, content_hash, _now()),
         )
         self.conn.commit()
 
@@ -110,7 +114,7 @@ class PipelineDB:
         cur = self.conn.execute(
             "INSERT OR IGNORE INTO records (record_type, dedup_key, payload_json, collected_at) "
             "VALUES (?, ?, ?, ?)",
-            (record_type, dedup_key, json.dumps(payload, default=str), datetime.utcnow().isoformat()),
+            (record_type, dedup_key, json.dumps(payload, default=str), _now()),
         )
         self.conn.commit()
         return cur.rowcount > 0
@@ -133,7 +137,7 @@ class PipelineDB:
         self.conn.execute(
             "INSERT INTO entity_mapping_log (raw_name, canonical_name, match_score, match_method, "
             "source_url, resolved_at) VALUES (?, ?, ?, ?, ?, ?)",
-            (raw_name, canonical_name, match_score, match_method, source_url, datetime.utcnow().isoformat()),
+            (raw_name, canonical_name, match_score, match_method, source_url, _now()),
         )
         self.conn.commit()
 
@@ -151,6 +155,6 @@ class PipelineDB:
     def log_event(self, phase: str, event: str, detail: str = "") -> None:
         self.conn.execute(
             "INSERT INTO run_log (phase, event, detail, ts) VALUES (?, ?, ?, ?)",
-            (phase, event, detail, datetime.utcnow().isoformat()),
+            (phase, event, detail, _now()),
         )
         self.conn.commit()

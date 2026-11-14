@@ -12,12 +12,9 @@ hallucinated employeeCount from an LLM guess on a page that already
 has the real number in a JSON field is a worse outcome than just
 reading the field).
 
-Secondary source hook: `extract_startup_via_llm` is provided for
-directory pages that only expose an HTML card (no JSON), routing
-through the LLM orchestrator with the ResearchPaperContent-style
-strict schema validation -- used for supplementary sources listed in
-architecture.pdf (e.g. AlternativeTo, individual "AI startup" blog
-directories) to diversify beyond a single source.
+Not built yet: a secondary, HTML-only source routed through the LLM
+orchestrator (llm/orchestrator.py) to diversify beyond YC. YC is the
+only startups source today.
 """
 from __future__ import annotations
 
@@ -49,40 +46,64 @@ logger = logging.getLogger("graphone.scrapers.startups")
 # yourself: open ycombinator.com/companies with browser devtools ->
 # Network tab -> filter "algolia.net" -> copy the `x-algolia-application-id`
 # and `x-algolia-api-key` request headers from a live request.
+import json
 import os
+from dataclasses import dataclass
+from urllib.parse import urlencode
 
-YC_ALGOLIA_URL = os.environ.get("YC_ALGOLIA_URL", "")           # e.g. https://<APP_ID>-dsn.algolia.net/1/indexes/*/queries
-YC_ALGOLIA_APP_ID = os.environ.get("YC_ALGOLIA_APP_ID", "")
-YC_ALGOLIA_API_KEY = os.environ.get("YC_ALGOLIA_API_KEY", "")
 YC_COMPANY_PAGE_BASE = "https://www.ycombinator.com/companies/"
+YC_INDEX_NAME = os.environ.get("YC_ALGOLIA_INDEX", "YCCompany_production")
 
 PAGE_SIZE = 100
 
 
-async def _fetch_yc_page(client: "httpx.AsyncClient", page: int, tags: Optional[List[str]] = None) -> dict:
+@dataclass(frozen=True)
+class AlgoliaConfig:
+    url: str
+    app_id: str
+    api_key: str
+
+
+def algolia_config_from_env() -> AlgoliaConfig:
+    """
+    Read the Algolia settings when they're needed, not at import time, so
+    values loaded from .env by the entry point are seen. YC_ALGOLIA_URL is
+    optional: Algolia's multi-query endpoint is derived from the app id.
+    """
+    app_id = os.environ.get("YC_ALGOLIA_APP_ID", "").strip()
+    api_key = os.environ.get("YC_ALGOLIA_API_KEY", "").strip()
+    url = os.environ.get("YC_ALGOLIA_URL", "").strip() or (
+        f"https://{app_id.lower()}-dsn.algolia.net/1/indexes/*/queries" if app_id else ""
+    )
+    return AlgoliaConfig(url=url, app_id=app_id, api_key=api_key)
+
+
+def build_algolia_params(page: int, tags: Optional[List[str]] = None) -> str:
+    """
+    Algolia's `params` is a URL-encoded query string. Values must be encoded:
+    a tag like "Artificial Intelligence" contains a space, which broke the
+    previous hand-built string.
+    """
+    params = {"query": "", "page": page, "hitsPerPage": PAGE_SIZE}
+    if tags:
+        params["facetFilters"] = json.dumps([[f"industry:{t}" for t in tags]])
+    return urlencode(params)
+
+
+async def _fetch_yc_page(client: "httpx.AsyncClient", cfg: AlgoliaConfig, page: int,
+                         tags: Optional[List[str]] = None) -> dict:
     """
     One page of YC's company search index. `tags` can filter to e.g.
     ["Artificial Intelligence"] to bias the sample toward the AI/venture
     vertical this graph cares about, matching the brief's domain focus.
     """
-    facet_filters = [[f"industry:{t}" for t in tags]] if tags else []
-    body = {
-        "requests": [
-            {
-                "indexName": "YCCompany_production",
-                "params": (
-                    f"query=&page={page}&hitsPerPage={PAGE_SIZE}"
-                    f"&facetFilters={facet_filters}".replace("'", '"')
-                ),
-            }
-        ]
-    }
+    body = {"requests": [{"indexName": YC_INDEX_NAME, "params": build_algolia_params(page, tags)}]}
     headers = {
-        "X-Algolia-Application-Id": YC_ALGOLIA_APP_ID,
-        "X-Algolia-API-Key": YC_ALGOLIA_API_KEY,
+        "X-Algolia-Application-Id": cfg.app_id,
+        "X-Algolia-API-Key": cfg.api_key,
         "Content-Type": "application/json",
     }
-    resp = await client.post(YC_ALGOLIA_URL, headers=headers, json=body, timeout=20.0)
+    resp = await client.post(cfg.url, headers=headers, json=body, timeout=20.0)
     resp.raise_for_status()
     return resp.json()
 
@@ -109,9 +130,10 @@ def _parse_yc_hit(hit: dict) -> Optional[dict]:
 async def iter_yc_startups(target_count: int = 1000, tags: Optional[List[str]] = None):
     if httpx is None:
         raise RuntimeError("httpx is not installed; pip install -r requirements.txt")
-    if not (YC_ALGOLIA_URL and YC_ALGOLIA_APP_ID and YC_ALGOLIA_API_KEY):
+    cfg = algolia_config_from_env()
+    if not (cfg.app_id and cfg.api_key):
         raise RuntimeError(
-            "YC_ALGOLIA_URL / YC_ALGOLIA_APP_ID / YC_ALGOLIA_API_KEY are not set. "
+            "YC_ALGOLIA_APP_ID / YC_ALGOLIA_API_KEY are not set. "
             "These must be captured from a live browser session against "
             "ycombinator.com/companies (see comment above) -- refusing to "
             "guess them rather than silently sending a broken/fabricated request."
@@ -121,7 +143,7 @@ async def iter_yc_startups(target_count: int = 1000, tags: Optional[List[str]] =
     page = 0
     async with httpx.AsyncClient() as client:
         while yielded < target_count:
-            data = await _fetch_yc_page(client, page, tags)
+            data = await _fetch_yc_page(client, cfg, page, tags)
             hits = data.get("results", [{}])[0].get("hits", [])
             if not hits:
                 break
