@@ -41,7 +41,7 @@ def make_fake_litellm(call_plan):
     call_log = []
 
     class FakeLiteLLM:
-        async def acompletion(self, model, messages, response_format, timeout, temperature):
+        async def acompletion(self, model, messages, response_format, timeout, temperature, **kwargs):
             call_log.append(model)
             behaviors = call_plan[model]
             behavior = behaviors.pop(0)
