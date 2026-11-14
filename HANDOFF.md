@@ -4,24 +4,30 @@
 new conversation with any AI assistant, in any tool, to resume this
 project with zero prior context. It is written to be self-contained.
 
-**Last updated:** after building the Jobs scraper (`src/scrapers/jobs.py`).
+**Last updated:** 2026-11-14, after a code review + fix pass and a small
+live run against the real APIs. §2-§3 below describe the original
+sandbox-era state; this table is current.
 
 ## Quick status (update this block on every session)
 
 | Phase | Item | Status |
 |---|---|---|
-| Schemas/infra | Pydantic schemas, dates/freshness, chunking, LLM orchestrator, entity resolver, SQLite storage | ✅ Built + tested |
-| Phase I | Research papers (Arxiv + GitHub stars) | ✅ Built + tested, network-unverified |
-| Phase I | Startups (YC directory) | ✅ Built + tested, network-unverified, creds unverified |
-| Phase I | Products (Product Hunt + LLM pricing) | ✅ Built + tested, network-unverified, creds unverified |
-| Phase II | Jobs (Greenhouse/Lever) | ✅ Built + tested, network-unverified, board tokens unverified |
-| Phase II | News | ❌ Not started |
-| Phase III | LLM extraction engine | ✅ Built + tested (used by products.py, reusable) |
-| Phase IV | Entity resolution | ✅ Built + tested (51 seed startups) |
-| Phase V | Anti-bot / Playwright | ❌ Not started |
-| Phase VI | architecture.pdf | ❌ Not started |
-| Deliverable | Google Sheets exporter | ❌ Not started |
-| Deliverable | Top-level CLI/orchestrator | ❌ Not started |
+| Schemas/infra | Schemas, dates/freshness, chunking, LLM orchestrator, entity resolver, SQLite storage | ✅ Built + tested |
+| Phase I | Research papers (arXiv + GitHub stars) | ✅ Live-verified (repo links from abstract + arXiv comments; Papers with Code removed, it shut down) |
+| Phase I | Startups (YC directory) | ✅ Built; ⚠️ configured Algolia app id doesn't exist (DNS fails) -- recapture from browser |
+| Phase I | Products (Product Hunt + LLM pricing) | ✅ Live-verified; pricing is UNKNOWN until an LLM account works |
+| Phase II | Jobs (Greenhouse/Lever/Ashby) | ✅ Live-verified, 5 boards (OpenAI, Anthropic, Scale AI, Cohere, ElevenLabs) |
+| Phase II | News (RSS) | ✅ Live-verified: article text extraction + entity mentions |
+| Phase III | LLM extraction engine | ✅ Built + tested; models updated; dead providers skipped per run |
+| Phase IV | Entity resolution | ✅ Built + tested (51 seeds, fuzzy on aliases, mention detection) |
+| Phase V | Anti-bot / Playwright | ✅ Built (fallback for blocked news pages); not live-tested -- needs `playwright install chromium` |
+| Phase VI | architecture.pdf | ✅ Done |
+| Deliverable | Google Sheets exporter | ✅ Built; not live-tested (no service account configured) |
+| Deliverable | Top-level CLI/orchestrator | ✅ `python src/main.py` |
+
+Account problems found on 2026-11-14 (not code issues): Gemini quota
+exhausted, Groq key rejected (401), DeepSeek "Insufficient Balance",
+GitHub token rejected (401), YC Algolia app id doesn't resolve.
 
 Full detail on each row is in §3 below.
 

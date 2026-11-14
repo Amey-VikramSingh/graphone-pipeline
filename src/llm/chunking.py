@@ -24,10 +24,18 @@ from typing import List
 
 try:
     import tiktoken
-    _ENCODER = tiktoken.get_encoding("cl100k_base")
 except ImportError:  # pragma: no cover
     tiktoken = None
-    _ENCODER = None
+
+_ENCODER = None
+if tiktoken is not None:
+    try:
+        # The first call downloads the encoding file. If that fails (offline,
+        # blocked, TLS interception) fall back to the approximation below
+        # rather than crashing every module that imports this one.
+        _ENCODER = tiktoken.get_encoding("cl100k_base")
+    except Exception:  # noqa: BLE001
+        _ENCODER = None
 
 
 def count_tokens(text: str) -> int:
@@ -88,6 +96,7 @@ def chunk_text(
     chunks: List[str] = []
     current: List[str] = []
     current_tokens = 0
+    used_sliding_window = False
 
     def flush():
         nonlocal current, current_tokens
@@ -102,6 +111,7 @@ def chunk_text(
             # A single paragraph is too big on its own (e.g. dumped raw
             # HTML text blob) — sliding-window it with overlap.
             flush()
+            used_sliding_window = True
             words = para.split()
             approx_words_per_chunk = max(50, int(max_tokens_per_chunk / 1.3))
             approx_overlap_words = max(10, int(overlap_tokens / 1.3))
@@ -121,4 +131,8 @@ def chunk_text(
         current_tokens += para_tokens
 
     flush()
-    return ChunkPlan(chunks=chunks, strategy="structural" if len(chunks) > 1 else "single")
+    if used_sliding_window:
+        strategy = "sliding_window"
+    else:
+        strategy = "structural" if len(chunks) > 1 else "single"
+    return ChunkPlan(chunks=chunks, strategy=strategy)

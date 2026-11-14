@@ -1,7 +1,7 @@
 """
 Multi-tier LLM extraction engine.
 
-Fallback chain: Gemini Flash -> Groq Llama 3 -> DeepSeek (configurable).
+Fallback chain: Gemini Flash -> Groq Llama 3.3 -> DeepSeek Flash (configurable).
 
 Handles:
   - 429 (rate limit): exponential backoff + jitter, retried on the SAME
@@ -51,7 +51,7 @@ logger = logging.getLogger("graphone.llm")
 
 @dataclass
 class ProviderConfig:
-    model: str                      # litellm model string, e.g. "gemini/gemini-1.5-flash"
+    model: str                      # litellm model string, e.g. "gemini/gemini-3.8-flash"
     max_context_tokens: int = 8000  # conservative payload-safe budget, not the model's true max
     max_retries_on_429: int = 4
     base_backoff_seconds: float = 1.5
@@ -68,11 +68,46 @@ class ExtractionResult:
     error: Optional[str] = None
 
 
+# Model ids checked against the providers' live model lists on 2026-11-14.
+# The previous ids (gemini-1.5-flash, groq llama3-70b-8192, deepseek-chat)
+# have all been retired. Groq's id could not be confirmed (the configured
+# key was rejected); llama-3.3-70b-versatile is its documented successor.
+# max_context_tokens is a payload-safe budget, not the model's true maximum.
 DEFAULT_CHAIN = [
-    ProviderConfig(model="gemini/gemini-1.5-flash", max_context_tokens=100_000),
-    ProviderConfig(model="groq/llama3-70b-8192", max_context_tokens=6_000),
-    ProviderConfig(model="deepseek/deepseek-chat", max_context_tokens=28_000),
+    ProviderConfig(model="gemini/gemini-3.8-flash", max_context_tokens=100_000),
+    ProviderConfig(model="groq/llama-3.3-70b-versatile", max_context_tokens=6_000),
+    ProviderConfig(model="deepseek/deepseek-flash", max_context_tokens=28_000),
 ]
+
+
+# Providers that failed in a way retrying can't fix (rejected key, no
+# balance, quota used up, retired model) are skipped for the rest of the
+# process. Without this, a dead provider is retried with backoff for EVERY
+# item -- e.g. 1,000 products x 5 attempts against an exhausted quota.
+_DISABLED_PROVIDERS: dict = {}  # model -> reason
+
+_QUOTA_MARKERS = ("exceeded your current quota", "insufficient_quota", "quota exceeded",
+                  "insufficient balance", "insufficient_balance", "billing")
+
+
+def disabled_providers() -> dict:
+    """model -> reason, for providers switched off during this run."""
+    return dict(_DISABLED_PROVIDERS)
+
+
+def reset_disabled_providers() -> None:
+    _DISABLED_PROVIDERS.clear()
+
+
+def _disable(provider: "ProviderConfig", reason: str) -> None:
+    if provider.model not in _DISABLED_PROVIDERS:
+        _DISABLED_PROVIDERS[provider.model] = reason
+        logger.warning("Disabling %s for the rest of this run: %s", provider.model, reason)
+
+
+def _is_quota_exhausted(err: Exception) -> bool:
+    text = str(err).lower()
+    return any(marker in text for marker in _QUOTA_MARKERS)
 
 
 def _backoff_delay(attempt: int, base: float, cap: float) -> float:
@@ -99,6 +134,10 @@ async def _call_provider(
         response_format={"type": "json_object"},
         timeout=provider.timeout_seconds,
         temperature=0,
+        # Some newer models reject parameters (gemini-3.8-flash rejects
+        # `temperature`). Drop what a model doesn't support instead of
+        # failing the call; JSON-mode and schema validation still apply.
+        drop_params=True,
     )
     return response.choices[0].message.content
 
@@ -124,6 +163,11 @@ async def extract_structured(
     attempts = []
 
     for provider in chain:
+        if provider.model in _DISABLED_PROVIDERS:
+            attempts.append({"provider": provider.model, "source_url": source_url,
+                             "outcome": f"skipped_disabled:{_DISABLED_PROVIDERS[provider.model]}"})
+            continue
+
         # Chunk to fit this provider's payload-safe budget. If the raw
         # text already fits, chunk_text returns a single chunk (no-op).
         plan = chunk_text(raw_text, max_tokens_per_chunk=provider.max_context_tokens)
@@ -156,6 +200,8 @@ async def extract_structured(
             # 413-after-rechunk case: this single chunk truly cannot be
             # processed by this provider even at its safe budget; skip
             # it (log already recorded) and try the next chunk/provider.
+            if provider.model in _DISABLED_PROVIDERS:
+                break  # provider died mid-document; don't try its other chunks
 
         logger.warning("Provider exhausted without a valid extraction: %s (source=%s)",
                         provider.model, source_url)
@@ -181,7 +227,12 @@ async def _extract_from_chunk_with_retry(
             trace["outcome"] = "success"
             return {"result": validated, "trace": trace}
 
-        except RateLimitError:
+        except RateLimitError as e:
+            if _is_quota_exhausted(e):
+                # A used-up quota/balance won't recover within backoff range.
+                trace["outcome"] = "quota_exhausted"
+                _disable(provider, "quota or balance exhausted")
+                return {"result": None, "trace": trace}
             if attempt >= provider.max_retries_on_429:
                 trace["outcome"] = f"429_exhausted_after_{attempt+1}_attempts"
                 logger.warning("429 exhausted on %s for %s", provider.model, source_url)
@@ -230,6 +281,22 @@ async def _extract_from_chunk_with_retry(
             delay = _backoff_delay(attempt, provider.base_backoff_seconds, provider.max_backoff_seconds)
             await asyncio.sleep(delay)
             continue
+
+        except Exception as e:  # noqa: BLE001
+            # Anything else is a non-retryable failure of THIS provider:
+            # a rejected/expired API key, a retired model id, a bad request.
+            # Retrying won't help, but the next provider in the chain might,
+            # so record it and fall through instead of aborting the whole
+            # extraction (and with it the calling pipeline phase).
+            trace["outcome"] = f"provider_failed:{type(e).__name__}"
+            logger.warning("Provider %s failed for %s: %s: %s",
+                           provider.model, source_url, type(e).__name__, str(e)[:200])
+            # Auth failures, missing balance and unknown models won't fix
+            # themselves within this run, so stop calling this provider.
+            name = type(e).__name__
+            if name in ("AuthenticationError", "PermissionDeniedError", "NotFoundError")                     or _is_quota_exhausted(e):
+                _disable(provider, name if not _is_quota_exhausted(e) else "quota or balance exhausted")
+            return {"result": None, "trace": trace}
 
     trace["outcome"] = "unknown_exit"
     return {"result": None, "trace": trace}

@@ -72,11 +72,13 @@ class PricingExtraction:
         self.pricingModel = pricingModel
 
     @classmethod
-    def model_validate(cls, data: dict):
-        value = data.get("pricingModel", "UNKNOWN")
-        if value not in {e.value for e in PricingModel}:
+    def model_validate(cls, data: object):
+        # A model can return valid JSON that isn't an object (a list, a bare
+        # string). Treat that as "no reliable signal" rather than crashing.
+        value = data.get("pricingModel", "UNKNOWN") if isinstance(data, dict) else "UNKNOWN"
+        if not isinstance(value, str) or value.upper() not in {e.value for e in PricingModel}:
             value = "UNKNOWN"
-        return cls(pricingModel=value)
+        return cls(pricingModel=value.upper())
 
 
 async def _fetch_producthunt_page(client: "httpx.AsyncClient", token: str, after: Optional[str]) -> dict:
