@@ -8,22 +8,23 @@ sources AI job postings directly from AI companies' own ATS-hosted
 career boards on Greenhouse and Lever. Both platforms expose public,
 unauthenticated, structured JSON APIs that the companies' own careers
 pages call client-side, so this is the same data the public website
-shows, just read directly. This keeps Phase II's job data 100%
+shows, just read directly. Ashby (used by OpenAI, Cohere and ElevenLabs)
+is supported the same way. This keeps Phase II's job data 100%
 structured and traceable to a real posting URL, consistent with this
 project's "never fabricate a field" rule, and reserves the anti-bot
 tooling (Phase V) for sources that genuinely require it.
 
-IMPORTANT -- board tokens below are UNVERIFIED, same discipline as
-startups.py / products.py: this sandbox has no network access, so
-these slugs (the `boardToken` in the Greenhouse/Lever URL) have not
-been confirmed live. They are my best documented guess for well-known
-AI companies' career board slugs, not confirmed fact. Verify each one
-before relying on it:
+Board tokens below were verified live on 2026-11-14 (each returned HTTP
+200 with postings). Companies move between ATS providers -- OpenAI and
+Cohere moved from Greenhouse to Ashby, and Hugging Face has no public
+board on any of the three -- so re-check if a board starts returning 404:
   - Greenhouse: visit the company's careers page, look for a request to
     `boards-api.greenhouse.io/v1/boards/<TOKEN>/jobs` in devtools, or
     check if `https://boards.greenhouse.io/<TOKEN>` redirects/loads.
   - Lever: check if `https://jobs.lever.co/<TOKEN>` loads, or look for
     a request to `api.lever.co/v0/postings/<TOKEN>` in devtools.
+  - Ashby: check if `https://jobs.ashbyhq.com/<TOKEN>` loads, or call
+    `api.ashbyhq.com/posting-api/job-board/<TOKEN>`.
 A board that 404s simply yields zero jobs for that company (handled
 gracefully, logged, does not crash the run) -- but do verify tokens
 before trusting the "5 AI job boards" coverage claim in a submission.
@@ -31,6 +32,7 @@ before trusting the "5 AI job boards" coverage claim in a submission.
 Freshness handling (the Phase II "Freshness Challenge"):
   - Lever's `createdAt` field is a genuine original-posting timestamp
     (epoch ms) -- reliable for the 24h freshness check on its own.
+  - Ashby's `publishedAt` is likewise the original publish time.
   - Greenhouse's public boards API only exposes `updated_at`, which can
     be touched by a recruiter editing an old posting WITHOUT it being a
     new posting -- an unreliable freshness signal on its own. To guard
@@ -60,23 +62,24 @@ logger = logging.getLogger("graphone.scrapers.jobs")
 
 GREENHOUSE_JOBS_URL_TMPL = "https://boards-api.greenhouse.io/v1/boards/{token}/jobs?content=true"
 LEVER_JOBS_URL_TMPL = "https://api.lever.co/v0/postings/{token}?mode=json"
+ASHBY_JOBS_URL_TMPL = "https://api.ashbyhq.com/posting-api/job-board/{token}"
 
 
 @dataclass
 class JobBoardConfig:
-    platform: str        # "greenhouse" | "lever"
-    board_token: str      # UNVERIFIED -- see module docstring
+    platform: str        # "greenhouse" | "lever" | "ashby"
+    board_token: str      # verified 2026-11-14 -- see module docstring
     company_display_name: str
 
 
 # "5 AI job boards" per the brief, sourced as 5 AI companies' own ATS
-# boards. UNVERIFIED tokens -- see module docstring before relying on this.
+# boards. Verified live 2026-11-14 -- see module docstring.
 DEFAULT_JOB_BOARDS: List[JobBoardConfig] = [
-    JobBoardConfig(platform="greenhouse", board_token="openai", company_display_name="OpenAI"),
+    JobBoardConfig(platform="ashby", board_token="openai", company_display_name="OpenAI"),
     JobBoardConfig(platform="greenhouse", board_token="anthropic", company_display_name="Anthropic"),
     JobBoardConfig(platform="greenhouse", board_token="scaleai", company_display_name="Scale AI"),
-    JobBoardConfig(platform="greenhouse", board_token="cohere", company_display_name="Cohere"),
-    JobBoardConfig(platform="lever", board_token="huggingface", company_display_name="Hugging Face"),
+    JobBoardConfig(platform="ashby", board_token="cohere", company_display_name="Cohere"),
+    JobBoardConfig(platform="ashby", board_token="elevenlabs", company_display_name="ElevenLabs"),
 ]
 
 # --------------------------------------------------------------------------
@@ -215,6 +218,59 @@ async def fetch_lever_jobs(client: "httpx.AsyncClient", board: JobBoardConfig) -
 
 
 # --------------------------------------------------------------------------
+# Ashby
+# --------------------------------------------------------------------------
+
+def _parse_ashby_job(job: dict, board: JobBoardConfig) -> Optional[dict]:
+    """Pure parsing of one Ashby posting (public posting API shape: title,
+    jobUrl, location, isRemote, workplaceType, publishedAt, isListed, ...).
+    Returns None if required fields are missing or the posting is unlisted."""
+    title = job.get("title")
+    job_url = job.get("jobUrl") or job.get("applyUrl")
+    if not title or not job_url or job.get("isListed") is False:
+        return None
+    # Prefer the specific workplaceType: live data has postings with
+    # isRemote=true AND workplaceType="Hybrid" (an SF office role), so the
+    # boolean alone over-reports remote roles. Fall back to isRemote, then
+    # to the location text.
+    workplace_type = (job.get("workplaceType") or "").lower()
+    if workplace_type == "remote":
+        is_remote: Optional[bool] = True
+    elif workplace_type in ("onsite", "hybrid"):
+        is_remote = False
+    elif isinstance(job.get("isRemote"), bool):
+        is_remote = job["isRemote"]
+    else:
+        is_remote = None
+    return {
+        "company": board.company_display_name,
+        "title": title.strip(),
+        "url": job_url,
+        "date_raw": job.get("publishedAt"),
+        "location_raw": job.get("location") or "",
+        "is_remote_explicit": is_remote,
+        "date_confidence": "strong_published_at",
+        "source_name": "jobs.ashbyhq.com",
+    }
+
+
+async def fetch_ashby_jobs(client: "httpx.AsyncClient", board: JobBoardConfig) -> List[dict]:
+    url = ASHBY_JOBS_URL_TMPL.format(token=board.board_token)
+    try:
+        resp = await client.get(url, timeout=30.0)
+        if resp.status_code == 404:
+            logger.warning("Ashby board not found (verify token): %s (%s)", board.board_token, url)
+            return []
+        resp.raise_for_status()
+    except Exception as e:  # noqa: BLE001
+        logger.warning("Ashby fetch failed for %s: %s", board.board_token, e)
+        return []
+
+    parsed = [_parse_ashby_job(job, board) for job in resp.json().get("jobs", [])]
+    return [p for p in parsed if p is not None]
+
+
+# --------------------------------------------------------------------------
 # Pipeline
 # --------------------------------------------------------------------------
 
@@ -280,6 +336,8 @@ async def run_jobs_pipeline(boards: Optional[List[JobBoardConfig]] = None, db=No
                 jobs = await fetch_greenhouse_jobs(client, board)
             elif board.platform == "lever":
                 jobs = await fetch_lever_jobs(client, board)
+            elif board.platform == "ashby":
+                jobs = await fetch_ashby_jobs(client, board)
             else:
                 logger.warning("Unknown job board platform: %s (%s)", board.platform, board.board_token)
                 continue

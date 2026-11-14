@@ -9,19 +9,20 @@ Data flow:
   1. Query the Arxiv API (export.arxiv.org/api/query) across configured
      categories (cs.AI, cs.LG, cs.CL, cs.CV, stat.ML, ...) with paging,
      to gather >= target_count unique papers with real published dates.
-  2. For each paper, attempt to find an associated GitHub repo:
-       a) Regex-scan the abstract/summary for a github.com URL (papers
-          often self-report this).
-       b) Fall back to the Papers with Code API (paperswithcode.com/api/v1)
-          which maps arxiv IDs -> official code repos.
+  2. For each paper, attempt to find an associated GitHub repo by
+     regex-scanning the abstract and arXiv's author `comment` field for a
+     github.com URL (authors often put "Code: github.com/..." in the
+     comment rather than the abstract; scanning both roughly doubles the
+     hit rate on recent papers). The previous fallback, the Papers with
+     Code API, was shut down in 2025 and now redirects to an HTML page.
   3. If a repo is found, hit the GitHub REST API for live star count.
   4. Emit ResearchPaperRecord objects; anything that fails schema
      validation (e.g. missing paper_url) is dropped and logged, never
      patched with a guessed value.
 
-Concurrency: bounded by two independent semaphores (one per external
-API) so a slow GitHub rate-limit window doesn't stall Arxiv paging, and
-vice versa.
+Concurrency: GitHub star lookups are bounded by a semaphore; Arxiv paging
+is sequential with the 3s delay Arxiv asks for. Pass a GitHub token
+(GITHUB_TOKEN) -- unauthenticated, GitHub allows only 60 requests/hour.
 """
 from __future__ import annotations
 
@@ -42,9 +43,8 @@ from utils.dates import normalize_date
 
 logger = logging.getLogger("graphone.scrapers.research_papers")
 
-ARXIV_API_URL = "http://export.arxiv.org/api/query"
+ARXIV_API_URL = "https://export.arxiv.org/api/query"
 GITHUB_API_URL = "https://api.github.com"
-PAPERSWITHCODE_API_URL = "https://paperswithcode.com/api/v1"
 
 ARXIV_NS = {
     "atom": "http://www.w3.org/2005/Atom",
@@ -89,6 +89,7 @@ def _parse_arxiv_entry(entry: ET.Element) -> Optional[dict]:
     ]
     published_raw = text("atom:published")
     summary = text("atom:summary") or ""
+    comment = text("arxiv:comment") or ""
 
     return {
         "paper_url": paper_url,
@@ -96,6 +97,7 @@ def _parse_arxiv_entry(entry: ET.Element) -> Optional[dict]:
         "authors": [a for a in authors if a],
         "published_raw": published_raw,
         "summary": summary,
+        "comment": comment,
     }
 
 
@@ -154,38 +156,35 @@ async def iter_arxiv_papers(config: ScraperConfig) -> AsyncIterator[dict]:
                 break
 
 
-async def _lookup_github_via_paperswithcode(client: "httpx.AsyncClient", arxiv_id: str) -> Optional[str]:
-    """arxiv_id like '2401.12345' (no version suffix)."""
-    try:
-        resp = await client.get(f"{PAPERSWITHCODE_API_URL}/papers/{arxiv_id}/repositories/", timeout=15.0)
-        if resp.status_code != 200:
-            return None
-        data = resp.json()
-        results = data.get("results", [])
-        if not results:
-            return None
-        # Prefer the official implementation if flagged, else first result.
-        official = next((r for r in results if r.get("is_official")), results[0])
-        return official.get("url")
-    except Exception as e:  # noqa: BLE001 - external API, degrade gracefully
-        logger.debug("PapersWithCode lookup failed for %s: %s", arxiv_id, e)
-        return None
+_github_token_rejected = False
 
 
 async def _get_github_stars(client: "httpx.AsyncClient", github_url: str, token: Optional[str]) -> Optional[int]:
+    global _github_token_rejected
     m = re.match(r"https?://github\.com/([\w.-]+)/([\w.-]+)", github_url)
     if not m:
         return None
     owner, repo = m.group(1), m.group(2).rstrip("/")
+    url = f"{GITHUB_API_URL}/repos/{owner}/{repo}"
     headers = {"Accept": "application/vnd.github+json"}
-    if token:
+    if token and not _github_token_rejected:
         headers["Authorization"] = f"Bearer {token}"
     try:
-        resp = await client.get(f"{GITHUB_API_URL}/repos/{owner}/{repo}", headers=headers, timeout=15.0)
+        resp = await client.get(url, headers=headers, timeout=15.0)
+        if resp.status_code == 401 and "Authorization" in headers:
+            # An expired/revoked token makes EVERY lookup fail, while public
+            # repo data is readable without one (at 60 req/hr). Drop the token
+            # for the rest of the run instead of losing all star counts.
+            if not _github_token_rejected:
+                logger.warning("GITHUB_TOKEN was rejected (401); continuing unauthenticated "
+                               "(60 requests/hour). Replace the token to restore the higher limit.")
+            _github_token_rejected = True
+            headers.pop("Authorization")
+            resp = await client.get(url, headers=headers, timeout=15.0)
         if resp.status_code == 404:
             return None
-        if resp.status_code == 403:
-            logger.warning("GitHub API rate-limited (403) fetching stars for %s", github_url)
+        if resp.status_code in (403, 429):
+            logger.warning("GitHub API rate-limited (%s) fetching stars for %s", resp.status_code, github_url)
             return None
         resp.raise_for_status()
         return resp.json().get("stargazers_count")
@@ -194,27 +193,19 @@ async def _get_github_stars(client: "httpx.AsyncClient", github_url: str, token:
         return None
 
 
-def _arxiv_id_from_url(paper_url: str) -> Optional[str]:
-    # e.g. http://arxiv.org/abs/2401.12345v2 -> 2401.12345
-    m = re.search(r"arxiv\.org/abs/([\w.\-]+?)(v\d+)?$", paper_url)
-    return m.group(1) if m else None
-
-
 async def enrich_with_github(
     raw_paper: dict, client: "httpx.AsyncClient", sem: asyncio.Semaphore, token: Optional[str]
 ) -> dict:
-    """Adds github_url / github_stars to a raw paper dict, trying
-    abstract-embedded links first, then Papers with Code."""
-    github_url = _extract_github_url_from_text(raw_paper.get("summary", ""))
+    """Adds github_url / github_stars to a raw paper dict. The repo link is
+    taken from the abstract, or failing that from arXiv's comment field."""
+    github_url = (
+        _extract_github_url_from_text(raw_paper.get("summary", ""))
+        or _extract_github_url_from_text(raw_paper.get("comment", ""))
+    )
 
-    async with sem:
-        if github_url is None:
-            arxiv_id = _arxiv_id_from_url(raw_paper["paper_url"])
-            if arxiv_id:
-                github_url = await _lookup_github_via_paperswithcode(client, arxiv_id)
-
-        stars = None
-        if github_url:
+    stars = None
+    if github_url:
+        async with sem:
             stars = await _get_github_stars(client, github_url, token)
 
     raw_paper["github_url"] = github_url
