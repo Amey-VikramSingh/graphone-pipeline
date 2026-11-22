@@ -1,7 +1,7 @@
 """
 Multi-tier LLM extraction engine.
 
-Fallback chain: Gemini Flash -> Groq Llama 3.3 -> DeepSeek Flash (configurable).
+Fallback chain: Gemini Flash -> Groq gpt-oss-120b -> Groq gpt-oss-20b -> DeepSeek Flash (configurable).
 
 Handles:
   - 429 (rate limit): exponential backoff + jitter, retried on the SAME
@@ -68,14 +68,18 @@ class ExtractionResult:
     error: Optional[str] = None
 
 
-# Model ids checked against the providers' live model lists on 2026-11-14.
-# The previous ids (gemini-1.5-flash, groq llama3-70b-8192, deepseek-chat)
-# have all been retired. Groq's id could not be confirmed (the configured
-# key was rejected); llama-3.3-70b-versatile is its documented successor.
+# Model ids checked against the providers' live model lists on 2026-11-22.
+# Groq retired its Llama 3.3 models; gpt-oss-120b and gpt-oss-20b replace
+# them. Groq's free tier allows 1,000 requests a day and 8,000 tokens a
+# minute *per model*, so listing both doubles the daily allowance, and the
+# extra 429 retries ride out the per-minute token window.
 # max_context_tokens is a payload-safe budget, not the model's true maximum.
 DEFAULT_CHAIN = [
     ProviderConfig(model="gemini/gemini-3.8-flash", max_context_tokens=100_000),
-    ProviderConfig(model="groq/llama-3.3-70b-versatile", max_context_tokens=6_000),
+    ProviderConfig(model="groq/openai/gpt-oss-120b", max_context_tokens=6_000,
+                   max_retries_on_429=6, max_backoff_seconds=60.0),
+    ProviderConfig(model="groq/openai/gpt-oss-20b", max_context_tokens=6_000,
+                   max_retries_on_429=6, max_backoff_seconds=60.0),
     ProviderConfig(model="deepseek/deepseek-flash", max_context_tokens=28_000),
 ]
 
@@ -86,8 +90,11 @@ DEFAULT_CHAIN = [
 # item -- e.g. 1,000 products x 5 attempts against an exhausted quota.
 _DISABLED_PROVIDERS: dict = {}  # model -> reason
 
+# Groq reports its daily caps as a 429 naming "requests per day (RPD)" or
+# "tokens per day (TPD)"; those reset in hours, so treat them as exhausted.
 _QUOTA_MARKERS = ("exceeded your current quota", "insufficient_quota", "quota exceeded",
-                  "insufficient balance", "insufficient_balance", "billing")
+                  "insufficient balance", "insufficient_balance", "billing",
+                  "requests per day", "tokens per day", "(rpd)", "(tpd)")
 
 
 def disabled_providers() -> dict:

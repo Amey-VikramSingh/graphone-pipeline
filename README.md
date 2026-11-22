@@ -29,7 +29,7 @@ instead of crashing it.
 
 - **Rate limits (429).** Requests to a model retry with exponential backoff and
   jitter, then move to the next provider in the chain: Gemini Flash, then Groq
-  (Llama 3.3 70B), then DeepSeek.
+  (gpt-oss-120b, then gpt-oss-20b), then DeepSeek.
 - **Oversized input (413).** Text is chunked by token count at paragraph
   boundaries before it reaches a model. If a provider still rejects it, the
   chunk is split again and retried.

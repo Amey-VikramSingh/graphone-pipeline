@@ -233,9 +233,16 @@ def test_dead_provider_is_skipped_for_rest_of_run():
 
 def test_default_chain_uses_current_models():
     assert [p.model for p in orch.DEFAULT_CHAIN] == [
-        "gemini/gemini-3.8-flash", "groq/llama-3.3-70b-versatile", "deepseek/deepseek-flash",
+        "gemini/gemini-3.8-flash", "groq/openai/gpt-oss-120b", "groq/openai/gpt-oss-20b",
+        "deepseek/deepseek-flash",
     ]
-    print("PASS: default LLM chain no longer uses retired models")
+    # Groq's daily caps come back as 429s; they must disable the provider, while
+    # the per-minute limit must not.
+    daily = Exception("Rate limit reached for model `openai/gpt-oss-120b` on requests per day (RPD): Limit 1000, Used 1000")
+    per_minute = Exception("Rate limit reached for model `openai/gpt-oss-120b` on tokens per minute (TPM): Limit 8000")
+    assert orch._is_quota_exhausted(daily)
+    assert not orch._is_quota_exhausted(per_minute)
+    print("PASS: default LLM chain uses current models; daily caps count as exhausted")
 
 
 def test_chunk_strategy_reports_sliding_window():
