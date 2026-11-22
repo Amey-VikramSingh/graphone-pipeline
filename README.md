@@ -128,9 +128,20 @@ them with a small live run.
 
 ## Status
 
-Every source has been run against its live API. Startups returned the full
-1,000 records from Wikidata in about 40 seconds. Product pricing needs a working
-LLM key, and the Sheets export needs a Google service account.
+Latest full run (22 November 2026, default settings):
+
+| Data | Records | Notes |
+|---|---|---|
+| Research papers | 1,000 | 136 link a GitHub repo and carry its star count |
+| Startups | 1,000 | From Wikidata, in about 40 seconds |
+| Products | 982 | 1,000 fetched; 18 were duplicates |
+| Jobs | 4 | Everything posted in the previous 24 hours |
+| News | 5 | Everything published in the previous 24 hours |
+
+Product pricing: 325 free, 91 freemium, 85 paid, 1 enterprise and 480 unknown.
+Most unknowns are product descriptions that don't mention price, which the
+classifier is told to leave as unknown rather than guess. The last 79 products
+were left unknown because both Groq models reached their free-tier daily limits.
 
 ## License
 
