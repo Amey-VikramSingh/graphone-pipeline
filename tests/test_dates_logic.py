@@ -1,7 +1,6 @@
-"""
-Tests for src/utils/dates.py — ISO fast-path parsing, freshness window
-boundaries, and the seen-URL/content-hash store. Run with:
-    python3 tests/test_dates_logic.py
+"""Tests for src/utils/dates.py: ISO parsing, the freshness window and the
+seen-URL store. Run with:
+    python tests/test_dates_logic.py
 """
 import sys
 from datetime import datetime, timezone, timedelta
@@ -26,21 +25,19 @@ def test_iso_fast_path():
 
 
 def test_relative_date_without_dateparser_raises_clearly():
-    # Without dateparser installed, confirm the failure mode
-    # is a clear, actionable RuntimeError and NOT a silently-wrong date.
+    # Without dateparser, relative dates must raise a clear error,
+    # not return a wrong date.
     try:
         normalize_date("2 hours ago")
         raised = False
     except RuntimeError:
         raised = True
-    # This assertion is conditional: if dateparser IS installed (e.g. in a
-    # real deployment), this should succeed instead. Either outcome is
-    # correct for its environment; what's never acceptable is a wrong,
-    # silently-fabricated date.
+    # With dateparser installed this parses instead. Either is fine;
+    # a silently wrong date is not.
     import utils.dates as dates_mod
     if dates_mod.dateparser is None:
         assert raised, "expected a clear RuntimeError when dateparser is unavailable"
-        print("PASS: relative date without dateparser raises clearly (no silent fabrication)")
+        print("PASS: relative date without dateparser raises a clear error")
     else:
         result = normalize_date("2 hours ago")
         assert result is not None

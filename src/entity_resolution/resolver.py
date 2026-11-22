@@ -1,22 +1,14 @@
-"""
-Deterministic-ish entity resolution: canonicalizes messy startup/product
-name strings ("OpenAI, Inc.", "Open AI", "openai") against a seed list
-of known canonical entities.
+"""Match company names written different ways ("OpenAI, Inc.", "Open AI",
+"openai") to one canonical name from a seed list.
 
-Pipeline (in order, cheapest/most-precise first):
-  1. Normalization (case-fold, strip legal suffixes/punctuation).
-  2. Exact match on normalized form / known alias.
-  3. Fuzzy match (token-sort ratio) against canonical names + aliases,
-     accepted only above a conservative similarity threshold.
-  4. If nothing clears the threshold, the entity is logged as
-     "unresolved_new" -- NOT silently mapped to the nearest neighbor.
-     A human/curation step (or a later run once the entity gets added
-     to the seed list) resolves these; we never guess a canonical name
-     the resolver isn't confident about, since a wrong merge silently
-     corrupts the graph in a way that's hard to detect later.
+Steps, cheapest first:
+  1. Normalise: lowercase, drop legal suffixes and punctuation.
+  2. Exact match on the normalised name or a known alias.
+  3. Fuzzy match (token-sort ratio) above a conservative threshold.
+  4. Otherwise log it as "unresolved_new" instead of forcing the closest
+     match. A wrong merge is much harder to spot later than a missed one.
 
-Every decision (including exact/unresolved) is logged as an
-EntityMappingLogEntry for the "Entity Mapping Log" deliverable tab.
+Every decision goes into the entity mapping log with its method and score.
 """
 from __future__ import annotations
 
@@ -84,10 +76,7 @@ class ResolutionResult:
 
 @dataclass
 class EntityResolver:
-    """
-    seed_entities: dict of canonical_name -> list of known aliases
-    (a seed list of about 50 well-known AI companies).
-    """
+    """seed_entities maps each canonical name to its known aliases (about 50 AI companies)."""
     seed_entities: Dict[str, List[str]] = field(default_factory=dict)
     threshold: float = FUZZY_MATCH_THRESHOLD
 
@@ -122,12 +111,9 @@ class EntityResolver:
                 )
 
     def find_mentions(self, text: str) -> List[str]:
-        """
-        Canonical names of known entities mentioned in free text (e.g. a news
-        article). Case-sensitive, whole-word matches on canonical names and
-        aliases, skipping names that are ordinary English words ("Scale",
-        "Writer", "Notion"...), which would produce false positives. Precision
-        over recall, consistent with the resolver's no-guessing rule.
+        """Canonical names of known companies mentioned in free text, such as a news
+        article. Matches whole words, case-sensitively, and skips names that are also
+        everyday words ("Scale", "Writer", "Notion") to avoid false hits.
         """
         if not text:
             return []
@@ -135,8 +121,7 @@ class EntityResolver:
         return sorted(found)
 
     def add_canonical_entity(self, canonical_name: str, aliases: Optional[List[str]] = None) -> None:
-        """Dynamically register a new canonical entity discovered at runtime
-        (e.g. an 'unresolved_new' entity that a curator/heuristic promotes)."""
+        """Register a new canonical company at runtime, e.g. one promoted from unresolved_new."""
         self.seed_entities.setdefault(canonical_name, [])
         if aliases:
             self.seed_entities[canonical_name].extend(aliases)

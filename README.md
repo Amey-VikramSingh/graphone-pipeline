@@ -51,6 +51,9 @@ instead of crashing it.
 - **Missing credentials.** A source whose credentials are missing fails with an
   error naming what to set; the other sources still run.
 
+More detail, and how this would scale past a single machine, is in
+[docs/architecture.md](docs/architecture.md).
+
 ## Entity resolution
 
 Company names arrive in many forms ("OpenAI", "OpenAI, Inc.", "Open AI"). The
@@ -75,7 +78,7 @@ src/
 ├── export/to_sheets.py      Google Sheets export, one tab per record type
 └── utils/                   Date normalization, HTML-to-text
 tests/                       Offline test suite (python tests/run_all.py)
-architecture.pdf             Design notes: scaling, rate limits, freshness, storage
+docs/architecture.md         Design notes: rate limits, freshness, scaling
 ```
 
 ## Getting started
@@ -125,7 +128,7 @@ python tests/run_all.py
 | `test_dates_logic.py` | Date parsing, the 24-hour window, the seen-URL store |
 | `test_orchestrator_logic.py` | Fallback chain, 429 backoff, 413 rechunking (with fakes) |
 | `test_jobs_logic.py` | Role classification, remote detection, Greenhouse and Lever parsing |
-| `test_review_fixes.py` | Ashby parsing, Wikidata queries and parsing, entity resolution, HTML extraction, dead-provider skipping, CLI |
+| `test_with_real_libraries.py` | Ashby parsing, Wikidata queries and parsing, entity resolution, HTML extraction, dead-provider skipping, CLI |
 
 The tests run offline in CI. The scrapers' HTTP calls aren't mocked, so check
 them with a small live run.

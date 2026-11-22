@@ -1,9 +1,6 @@
-"""
-Tests for src/scrapers/jobs.py — role classification, remote detection,
-Greenhouse/Lever payload parsing, and the layered freshness logic that
-distinguishes Lever's trustworthy createdAt from Greenhouse's weaker
-updated_at signal. Run with:
-    python3 tests/test_jobs_logic.py
+"""Tests for src/scrapers/jobs.py: role classification, remote detection,
+Greenhouse and Lever parsing, and the freshness rules. Run with:
+    python tests/test_jobs_logic.py
 """
 import os
 import sys
@@ -106,8 +103,7 @@ def test_layered_freshness():
     d = normalize_date(gh["date_raw"])
     assert passes_freshness(gh, d, db=db) is True
 
-    # Same job, already seen -> must NOT re-qualify even with a "recent" updated_at
-    # (this is the core defense against a recruiter re-touching an old posting)
+    # Same job, already seen: an edited old post must not count as new
     db.mark_seen(gh["url"])
     assert passes_freshness(gh, d, db=db) is False
 
@@ -135,7 +131,7 @@ def test_to_record_end_to_end():
     assert rec.content.is_remote is True
     assert rec.content.role_family == "Research"
 
-    # missing/unparseable date -> dropped, never fabricated
+    # missing or unparseable date -> dropped
     bad_job = dict(raw_job)
     bad_job["date_raw"] = None
     assert to_record(bad_job) is None

@@ -1,5 +1,5 @@
 """
-News vertical (Phase II): fresh AI news from RSS feeds.
+Fresh AI news from RSS feeds.
 
 For each feed entry published within the last 24 hours (and not seen on a
 previous run), fetch the article, extract its readable text, and record
@@ -111,7 +111,7 @@ async def run_news_pipeline(db: PipelineDB, resolver: Optional[EntityResolver] =
     Returns fresh NewsRecords. The caller persists them; this function only
     marks article URLs as seen so the next run doesn't re-ingest them.
     """
-    logger.info("Starting Phase II: News Pipeline...")
+    logger.info("Fetching news feeds...")
     records: List[NewsRecord] = []
     browser = LazyAntiBotBrowser()
     try:

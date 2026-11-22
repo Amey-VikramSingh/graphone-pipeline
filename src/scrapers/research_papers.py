@@ -1,28 +1,15 @@
-"""
-Research Papers vertical: Arxiv API -> GitHub repo resolution -> live star
-count, fully via official/free APIs (no HTML scraping, no anti-bot fight,
-no LLM guessing required for this vertical -- which is deliberate: this
-is the one vertical where we can get 1,000+ records that are 100%
-traceable to a real source URL with zero hallucination risk).
+"""Research papers from arXiv, with GitHub star counts.
 
-Data flow:
-  1. Query the Arxiv API (export.arxiv.org/api/query) across configured
-     categories (cs.AI, cs.LG, cs.CL, cs.CV, stat.ML, ...) with paging,
-     to gather >= target_count unique papers with real published dates.
-  2. For each paper, attempt to find an associated GitHub repo by
-     regex-scanning the abstract and arXiv's author `comment` field for a
-     github.com URL (authors often put "Code: github.com/..." in the
-     comment rather than the abstract; scanning both roughly doubles the
-     hit rate on recent papers). The previous fallback, the Papers with
-     Code API, was shut down in 2025 and now redirects to an HTML page.
-  3. If a repo is found, hit the GitHub REST API for live star count.
-  4. Emit ResearchPaperRecord objects; anything that fails schema
-     validation (e.g. missing paper_url) is dropped and logged, never
-     patched with a guessed value.
+  1. Page through the arXiv API for the configured categories (cs.AI, cs.LG,
+     cs.CL, cs.CV, stat.ML, ...) until there are enough unique papers.
+  2. Look for a github.com link in the abstract and in arXiv's comment
+     field. Authors often put "Code: github.com/..." in the comment, so
+     checking both roughly doubles the hit rate.
+  3. If a repo is found, read its star count from the GitHub API.
 
-Concurrency: GitHub star lookups are bounded by a semaphore; Arxiv paging
-is sequential with the 3s delay Arxiv asks for. Pass a GitHub token
-(GITHUB_TOKEN) -- unauthenticated, GitHub allows only 60 requests/hour.
+arXiv asks for at least 3 seconds between requests, so paging is sequential.
+GitHub lookups run concurrently up to a limit. Set GITHUB_TOKEN: without it
+GitHub allows only 60 requests an hour.
 """
 from __future__ import annotations
 
@@ -71,8 +58,7 @@ class ScraperConfig:
 
 
 def _parse_arxiv_entry(entry: ET.Element) -> Optional[dict]:
-    """Parse one <entry> from the Arxiv Atom feed into a plain dict.
-    Returns None if required fields (title, id/url) are missing."""
+    """Parse one <entry> from arXiv's Atom feed. Returns None if the title or URL is missing."""
     def text(path: str) -> Optional[str]:
         el = entry.find(path, ARXIV_NS)
         return el.text.strip() if el is not None and el.text else None
@@ -127,8 +113,7 @@ async def _fetch_arxiv_page(client: "httpx.AsyncClient", category: str, start: i
 
 
 async def iter_arxiv_papers(config: ScraperConfig) -> AsyncIterator[dict]:
-    """Yields raw paper dicts (pre-GitHub-enrichment) until target_count
-    unique papers have been yielded, paging across configured categories."""
+    """Yield unique papers across the configured categories until target_count is reached."""
     if httpx is None:
         raise RuntimeError("httpx is not installed; pip install -r requirements.txt")
 
@@ -172,9 +157,8 @@ async def _get_github_stars(client: "httpx.AsyncClient", github_url: str, token:
     try:
         resp = await client.get(url, headers=headers, timeout=15.0)
         if resp.status_code == 401 and "Authorization" in headers:
-            # An expired/revoked token makes EVERY lookup fail, while public
-            # repo data is readable without one (at 60 req/hr). Drop the token
-            # for the rest of the run instead of losing all star counts.
+            # A revoked token makes every lookup fail, but public repos can be read
+            # without one (60 requests an hour), so drop the token for this run.
             if not _github_token_rejected:
                 logger.warning("GITHUB_TOKEN was rejected (401); continuing unauthenticated "
                                "(60 requests/hour). Replace the token to restore the higher limit.")
@@ -196,8 +180,7 @@ async def _get_github_stars(client: "httpx.AsyncClient", github_url: str, token:
 async def enrich_with_github(
     raw_paper: dict, client: "httpx.AsyncClient", sem: asyncio.Semaphore, token: Optional[str]
 ) -> dict:
-    """Adds github_url / github_stars to a raw paper dict. The repo link is
-    taken from the abstract, or failing that from arXiv's comment field."""
+    """Add github_url and github_stars, using a link from the abstract or the comment field."""
     github_url = (
         _extract_github_url_from_text(raw_paper.get("summary", ""))
         or _extract_github_url_from_text(raw_paper.get("comment", ""))
@@ -214,9 +197,7 @@ async def enrich_with_github(
 
 
 def to_record(raw_paper: dict) -> Optional[ResearchPaperRecord]:
-    """Validate+convert a raw (possibly GitHub-enriched) paper dict into a
-    ResearchPaperRecord. Returns None (and logs) if it fails schema
-    validation -- never coerces a missing required field."""
+    """Build a ResearchPaperRecord, or return None (and log) if validation fails."""
     try:
         content = ResearchPaperContent(
             title=raw_paper["title"],
@@ -237,7 +218,7 @@ def to_record(raw_paper: dict) -> Optional[ResearchPaperRecord]:
 
 
 async def run_research_papers_pipeline(config: Optional[ScraperConfig] = None) -> List[ResearchPaperRecord]:
-    """Top-level entry point: Arxiv paging -> GitHub enrichment -> validated records."""
+    """arXiv paging, then GitHub lookups, then validated records."""
     config = config or ScraperConfig()
     if httpx is None:
         raise RuntimeError("httpx is not installed; pip install -r requirements.txt")

@@ -1,20 +1,14 @@
-"""
-Multi-tier LLM extraction engine.
+"""Structured extraction with a chain of LLM providers.
 
-Fallback chain: Gemini Flash -> Groq gpt-oss-120b -> Groq gpt-oss-20b -> DeepSeek Flash (configurable).
-
-Handles:
-  - 429 (rate limit): exponential backoff + jitter, retried on the SAME
-    provider up to a cap, then falls through to the next provider in
-    the chain rather than blocking the whole pipeline on one provider.
-  - 413 / context-length-exceeded: caught explicitly, the input is
-    re-chunked smaller (see llm.chunking) and retried; if a chunk still
-    can't fit after re-chunking, it is skipped and logged, never
-    silently truncated in a way that could cut off the field we need.
-  - Every provider response is JSON-schema validated (pydantic) before
-    acceptance. A response that fails validation is treated the same
-    as a hard failure and falls through the chain -- we do not patch
-    or coerce a malformed LLM response into looking valid.
+Providers are tried in order (see DEFAULT_CHAIN). For each one:
+  - 429 rate limits are retried with exponential backoff, waiting as long as
+    the provider asks when it says. Once retries run out, the next provider
+    is tried.
+  - 413 / context-length errors make the chunk smaller and retry it.
+  - Every response must parse as JSON and validate against the schema; one
+    that doesn't counts as a failure and the next provider is tried.
+  - A provider that can't recover during this run (rejected key, no balance,
+    daily cap reached) is switched off for the rest of the run.
 """
 from __future__ import annotations
 
@@ -87,8 +81,7 @@ DEFAULT_CHAIN = [
 
 # Providers that failed in a way retrying can't fix (rejected key, no
 # balance, quota used up, retired model) are skipped for the rest of the
-# process. Without this, a dead provider is retried with backoff for EVERY
-# item -- e.g. 1,000 products x 5 attempts against an exhausted quota.
+# run. Otherwise a dead provider would be retried for every single item.
 _DISABLED_PROVIDERS: dict = {}  # model -> reason
 
 # Groq reports its daily caps as a 429 naming "requests per day (RPD)" or
@@ -176,14 +169,10 @@ async def extract_structured(
     source_url: str,
     chain: Optional[list] = None,
 ) -> ExtractionResult:
-    """
-    Extract `schema`-validated structured data from `raw_text`, walking
-    the provider fallback chain and handling 429/413 per-provider.
+    """Extract `schema`-validated data from `raw_text` using the provider chain.
 
-    `source_url` is required and is threaded through purely so callers
-    can log which real source a failure/success traces back to -- it is
-    NEVER inserted into the LLM output; the LLM must not be the source
-    of truth for source.url, the crawler is.
+    `source_url` is only used in logs, to trace a result back to its page. It is
+    never taken from the model's output.
     """
     chain = chain or DEFAULT_CHAIN
     attempts = []
@@ -198,12 +187,9 @@ async def extract_structured(
         # text already fits, chunk_text returns a single chunk (no-op).
         plan = chunk_text(raw_text, max_tokens_per_chunk=provider.max_context_tokens)
 
-        # For extraction (not summarization-of-everything), we combine
-        # chunk outputs by taking the first chunk that yields a valid,
-        # sufficiently-populated record. Most target pages have their
-        # structured facts (title, authors, price, company) near the top,
-        # so this keeps latency/cost down; a "merge across chunks" mode
-        # can be swapped in per-field for pages where facts are scattered.
+        # Use the first chunk that gives a valid result. The facts we extract
+        # (title, price, company) are usually near the top of a page, so this
+        # saves calls; pages with scattered facts would need merging instead.
         for chunk_idx, chunk in enumerate(plan.chunks):
             outcome = await _extract_from_chunk_with_retry(
                 provider=provider,
@@ -223,9 +209,7 @@ async def extract_structured(
                     provider_used=provider.model,
                     attempts=attempts,
                 )
-            # 413-after-rechunk case: this single chunk truly cannot be
-            # processed by this provider even at its safe budget; skip
-            # it (log already recorded) and try the next chunk/provider.
+            # Still too large after re-chunking: skip this chunk on this provider.
             if provider.model in _DISABLED_PROVIDERS:
                 break  # provider died mid-document; don't try its other chunks
 
@@ -276,18 +260,14 @@ async def _extract_from_chunk_with_retry(
             # Re-chunk this specific piece smaller and retry once, in-place.
             smaller_budget = max(500, provider.max_context_tokens // 2)
             if count_tokens(chunk) <= smaller_budget:
-                # Already small and still overflowed -- nothing more we can do
-                # for this chunk on this provider.
+                # Already small and still too large; give up on this provider.
                 trace["outcome"] = "413_unresolvable_at_min_chunk_size"
                 return {"result": None, "trace": trace}
             sub_plan = chunk_text(chunk, max_tokens_per_chunk=smaller_budget)
             trace["outcome"] = f"413_rechunked_into_{len(sub_plan.chunks)}"
-            # Recurse on the first sub-chunk only (extraction targets are
-            # front-loaded on most pages, consistent with the top-level
-            # chunk-selection strategy above). Preserve this trace by
-            # nesting the sub-attempt rather than discarding it -- losing
-            # the 413 event here would make rate-limit/payload dashboards
-            # blind to how often rechunking is actually happening.
+            # Retry with the first, smaller piece only (same reasoning as the
+            # chunk selection above). The nested trace keeps the 413 visible
+            # in the logs.
             sub_outcome = await _extract_from_chunk_with_retry(
                 provider=provider, chunk=sub_plan.chunks[0], chunk_idx=chunk_idx,
                 total_chunks=total_chunks, system_prompt=system_prompt,
@@ -297,9 +277,8 @@ async def _extract_from_chunk_with_retry(
             return {"result": sub_outcome["result"], "trace": trace}
 
         except (json.JSONDecodeError, ValidationError) as e:
-            # Model returned malformed / schema-invalid JSON. We do NOT
-            # attempt to coerce or hallucinate-fill this -- treat as a
-            # failed attempt and fall through to the next provider.
+            # Invalid JSON or a schema mismatch: count it as a failure and move on
+            # to the next provider rather than trying to repair the output.
             trace["outcome"] = f"invalid_response:{type(e).__name__}"
             logger.warning("Schema validation failed for %s on %s: %s", source_url, provider.model, e)
             return {"result": None, "trace": trace}
@@ -313,11 +292,8 @@ async def _extract_from_chunk_with_retry(
             continue
 
         except Exception as e:  # noqa: BLE001
-            # Anything else is a non-retryable failure of THIS provider:
-            # a rejected/expired API key, a retired model id, a bad request.
-            # Retrying won't help, but the next provider in the chain might,
-            # so record it and fall through instead of aborting the whole
-            # extraction (and with it the calling pipeline phase).
+            # Anything else (rejected key, retired model, bad request) won't be
+            # fixed by retrying this provider, but the next one may work.
             trace["outcome"] = f"provider_failed:{type(e).__name__}"
             logger.warning("Provider %s failed for %s: %s: %s",
                            provider.model, source_url, type(e).__name__, str(e)[:200])

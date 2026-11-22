@@ -1,19 +1,11 @@
-"""
-Products vertical.
+"""Products from Product Hunt's GraphQL API.
 
-Primary source: Product Hunt's public GraphQL API (developers.producthunt.com).
-This requires a free developer API token (OAuth client-credentials flow)
--- unlike YC's directory, Product Hunt does gate this behind auth, so
-`PRODUCTHUNT_API_TOKEN` must be supplied via environment variable. This
-module refuses to run without it rather than falling back to scraping
-the HTML in a way that would violate Product Hunt's terms.
+The API needs a free developer token (PRODUCTHUNT_API_TOKEN). Without one,
+the phase stops with an error rather than scraping the site's HTML.
 
-`pricingModel` is frequently NOT present as a clean enum in source data
-(a listing might say "Free plan available, paid tiers from $19/mo" in
-prose). For that field specifically we route through the LLM extraction
-engine (Phase III) with a constrained prompt that forces one of the four
-enum values or UNKNOWN -- this is the one place in this vertical where
-LLM extraction is actually earning its keep over a direct field read.
+Pricing usually only appears in the product's description ("free plan,
+paid tiers from $19/mo"), so it's classified by an LLM with a prompt that
+allows FREE, FREEMIUM, PAID, ENTERPRISE or UNKNOWN.
 """
 from __future__ import annotations
 
@@ -65,9 +57,7 @@ Rules:
 
 
 class PricingExtraction:
-    """Lightweight schema for the pricing-model LLM extraction call.
-    (Kept separate from schemas.models since this is an intermediate
-    extraction target, not the final ProductRecord shape.)"""
+    """Result of the pricing call. Kept apart from schemas.models; it's an intermediate value."""
     def __init__(self, pricingModel: str):
         self.pricingModel = pricingModel
 
@@ -113,8 +103,7 @@ async def iter_producthunt_products(target_count: int = 1000):
     if not token:
         raise RuntimeError(
             "PRODUCTHUNT_API_TOKEN is not set. Register a free developer app at "
-            "https://api.producthunt.com/v2/oauth/applications and export the token -- "
-            "refusing to proceed without real credentials rather than fabricating requests."
+            "https://api.producthunt.com/v2/oauth/applications and set the token in .env."
         )
 
     yielded = 0
@@ -141,8 +130,7 @@ async def iter_producthunt_products(target_count: int = 1000):
 
 
 async def classify_pricing_model(description: str, source_url: str) -> PricingModel:
-    """Route through the LLM fallback chain; on total failure, default to
-    UNKNOWN rather than guessing FREE/PAID/etc without signal."""
+    """Classify pricing with the LLM chain. Returns UNKNOWN if every provider fails."""
     if not description.strip():
         return PricingModel.UNKNOWN
     result = await extract_structured(

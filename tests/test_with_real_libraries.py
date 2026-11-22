@@ -1,7 +1,6 @@
-"""
-Tests that use the real installed libraries (pydantic, litellm, ...)
+"""Tests that run against the real installed libraries (pydantic, litellm, ...)
 rather than the fakes in _fakes.py. Run with:
-    python tests/test_review_fixes.py
+    python tests/test_with_real_libraries.py
 """
 import asyncio
 import json
@@ -282,4 +281,4 @@ if __name__ == "__main__":
     test_default_chain_uses_current_models()
     test_chunk_strategy_reports_sliding_window()
     test_cli_arguments()
-    print("\nALL REVIEW-FIX TESTS PASSED")
+    print("\nALL REAL-LIBRARY TESTS PASSED")

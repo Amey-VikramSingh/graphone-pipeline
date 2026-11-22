@@ -1,9 +1,7 @@
-"""
-Canonical output schemas for the ingestion pipeline.
+"""Pydantic schemas for every record type.
 
-Every scraper/LLM-extractor in this repo must produce records that validate
-against one of these models before they are persisted or exported.
-Validation failure = the record is dropped and logged, never guessed at.
+A scraper's output must validate against one of these before it's stored or
+exported; anything that doesn't is dropped and logged.
 """
 from __future__ import annotations
 
@@ -184,7 +182,7 @@ class NewsRecord(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Entity mapping log (raw -> canonical), for the "Entity Mapping Log" tab
+# Entity mapping log (raw name -> canonical name)
 # ---------------------------------------------------------------------------
 
 class EntityMappingLogEntry(BaseModel):

@@ -1,20 +1,9 @@
-"""
-Local SQLite storage layer.
+"""SQLite storage for a single-machine run.
 
-This is the working store for a single-node run of the pipeline. It is
-NOT the architecture recommended for 500k+ scale / multi-node crawling
-(see architecture.pdf for the Postgres + Redis-backed design) -- it's
-the pragmatic, dependency-light store for this trial, with a schema
-that mirrors the same "seen_urls" / entity dedup concepts the
-production design uses, so the migration path is mostly "swap the
-connection", not "redesign the logic".
-
-Responsibilities:
-  - Persist validated records (Startup / Product / ResearchPaper / Job /
-    News) as JSON blobs alongside indexed columns used for dedup.
-  - Track `seen_urls` for the freshness/dedup logic in utils.dates.
-  - Persist the entity mapping log (raw -> canonical) for the
-    "Entity Mapping Log" deliverable tab.
+Holds the validated records (as JSON, with a dedup key), the seen-URL list
+used by the freshness checks, the entity mapping log and a per-phase run
+log. A multi-node setup would use Postgres and Redis instead (see
+docs/architecture.md); the tables map onto that design directly.
 """
 from __future__ import annotations
 
@@ -105,11 +94,10 @@ class PipelineDB:
     # -- records ---------------------------------------------------------
 
     def upsert_record(self, record_type: str, dedup_key: str, payload: dict) -> bool:
-        """
-        Insert a record, ignoring (not overwriting) on dedup_key collision.
-        Returns True if this was a new row, False if it was a duplicate.
-        `payload` must already be a JSON-serializable dict (e.g. via
-        Pydantic's `.model_dump(mode="json")`).
+        """Insert a record unless one with the same dedup key exists.
+
+        Returns True for a new row. `payload` must be JSON-serialisable, e.g. from
+        `model.model_dump(mode="json")`.
         """
         cur = self.conn.execute(
             "INSERT OR IGNORE INTO records (record_type, dedup_key, payload_json, collected_at) "

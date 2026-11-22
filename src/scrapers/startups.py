@@ -1,17 +1,13 @@
-"""
-Startups vertical.
+"""AI companies from Wikidata.
 
-Source: Wikidata, queried through its public SPARQL endpoint. Wikidata's
-data is CC0 (public domain) and the query service is meant for automated
-use, so no key or scraping is involved. The query selects organizations
-whose industry (P452) is artificial intelligence or machine learning and
-whose type (P31, or one subclass step up) is a kind of company. Entries
-such as research institutes, associations and software products share
-the industry tag but are filtered out by type.
+Wikidata's data is public domain (CC0) and its SPARQL endpoint is meant for
+scripts, so no key is needed. The query picks organisations whose industry
+(P452) is AI or machine learning and whose type (P31, or one subclass up) is
+a kind of company; research institutes and software products share the
+industry tag but are filtered out by type.
 
-Every field comes straight from a Wikidata statement. Employee counts are
-only present for a minority of companies; when the statement is missing,
-employeeCount stays None rather than being estimated.
+Only a minority of entries record an employee count (P1128). When it's
+missing, employeeCount stays None.
 """
 from __future__ import annotations
 

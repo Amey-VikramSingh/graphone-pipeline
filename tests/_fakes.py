@@ -1,16 +1,7 @@
-"""
-Minimal stand-ins for pydantic and litellm, used only to exercise the
-control-flow / schema logic of src/llm/orchestrator.py and
-src/schemas/models.py inside an environment with no network access to
-install the real packages. NOT part of the shipped pipeline -- in the
-real environment, requirements.txt pulls the genuine libraries and
-these fakes are irrelevant/unused.
-
-This is a deliberately small subset of real pydantic v2 behavior:
-required-field checking, defaults / default_factory, nested BaseModel
-coercion, and field_validator execution. It does NOT do real type
-coercion/parsing the way pydantic does -- just enough to prove our
-model *structure* (required fields, validators, nesting) is correct.
+"""Small stand-ins for pydantic and litellm, so the orchestrator's control flow
+can be tested without installing either. Only what those tests need is
+implemented: required fields, defaults, nested models and field validators.
+The real libraries are covered by test_with_real_libraries.py.
 """
 import inspect
 import sys

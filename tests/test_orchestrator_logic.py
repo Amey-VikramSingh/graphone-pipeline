@@ -87,12 +87,9 @@ async def test_fallback_chain_on_429_exhaustion_then_bad_json_then_success():
 
 
 async def test_413_triggers_rechunk_and_retry_succeeds_on_smaller_chunk():
-    # This exercises _extract_from_chunk_with_retry directly with a chunk
-    # that is deliberately larger than the provider's stated budget --
-    # simulating a provider that unexpectedly 413s on something the
-    # top-level chunker sized optimistically (token-count estimation
-    # mismatches between our estimator and the provider's real tokenizer
-    # are exactly the real-world case this path exists for).
+    # Calls _extract_from_chunk_with_retry with a chunk bigger than the
+    # provider's budget, as happens when our token estimate is lower than
+    # the provider's real count.
     provider = orch.ProviderConfig(model="fake/p1", max_context_tokens=2000, max_retries_on_429=1,
                                     base_backoff_seconds=0.01, max_backoff_seconds=0.02)
 
@@ -140,7 +137,7 @@ async def test_all_providers_exhausted_returns_ok_false():
     assert result.ok is False
     assert result.data is None
     assert "exhausted" in result.error
-    print("PASS: full chain exhaustion returns ok=False with no fabricated data")
+    print("PASS: when every provider fails, the result is ok=False with no data")
 
 
 async def test_backoff_timing_grows_and_respects_cap():

@@ -1,15 +1,9 @@
-"""
-Date normalization: turns messy real-world date strings ("2 hours ago",
-"Jan 3, 2025", ISO 8601, RFC 822 from RSS, bare epoch ints, etc.) into
-timezone-aware UTC datetimes, and provides the 24-hour freshness check
-used by Phase II.
+"""Date parsing and the 24-hour freshness check.
 
-Design notes:
-- We never silently invent a date. If nothing usable is found, the
-  caller gets `None` back and must apply the "intelligent heuristic"
-  (see `is_probably_new`) rather than fabricating a timestamp.
-- All parsing is timezone-aware; naive datetimes are assumed UTC only
-  as an explicit, logged fallback (dateparser.settings below).
+normalize_date() turns "2 hours ago", "Jan 3, 2025", RSS (RFC 822) dates, ISO
+8601 strings and epoch numbers into UTC datetimes. When a string can't be
+parsed it returns None, and callers treat the date as unknown instead of
+substituting the current time.
 """
 from __future__ import annotations
 
@@ -32,22 +26,14 @@ _DATEPARSER_SETTINGS = {
 
 
 def normalize_date(raw: Optional[str], *, reference_time: Optional[datetime] = None) -> Optional[datetime]:
-    """
-    Parse a raw date string (absolute or relative) into a UTC-aware datetime.
-
-    Returns None if the string is empty/unparseable — callers must treat
-    that as "unknown", never coerce it to now() or any other guessed value.
-    """
+    """Parse an absolute or relative date string into a UTC datetime, or return None."""
     if not raw or not raw.strip():
         return None
     raw = raw.strip()
 
-    # Fast path: already-clean ISO 8601 (the common case for API-sourced
-    # dates, e.g. Lever's createdAt or Arxiv's <published>). Skips the
-    # heavier dateparser fuzzy-matching entirely when it's not needed,
-    # and lets this path work even in environments without dateparser
-    # installed (this module degrades gracefully rather than hard-
-    # requiring the dependency for the common case).
+    # Fast path for clean ISO 8601 strings, which is what most APIs return
+    # (Lever's createdAt, arXiv's <published>). It skips dateparser, so it
+    # also works when dateparser isn't installed.
     iso_candidate = raw[:-1] + "+00:00" if raw.endswith("Z") else raw
     try:
         dt = datetime.fromisoformat(iso_candidate)
@@ -78,11 +64,8 @@ def normalize_date(raw: Optional[str], *, reference_time: Optional[datetime] = N
 
 def is_within_freshness_window(dt: Optional[datetime], *, now: Optional[datetime] = None,
                                 hours: int = FRESHNESS_WINDOW_HOURS) -> bool:
-    """
-    Strict freshness check used to gate News/Jobs ingestion. If dt is None
-    (unparseable / missing), this returns False — an item with no
-    trustworthy timestamp does NOT get to claim freshness by default.
-    Use `is_probably_new` for the heuristic fallback path instead.
+    """True if dt falls inside the window. A missing date (None) is never fresh;
+    use is_probably_new() for sources that have no usable dates.
     """
     if dt is None:
         return False
@@ -91,16 +74,9 @@ def is_within_freshness_window(dt: Optional[datetime], *, now: Optional[datetime
 
 
 def is_probably_new(url: str, seen_urls: "SeenUrlStore", *, content_hash: Optional[str] = None) -> bool:
-    """
-    Intelligent heuristic for sources with no reliable date signal at all.
-
-    Strategy: treat "new" as "not previously seen by this crawler, by URL
-    OR by content hash (to catch same content at a different URL/query
-    string, e.g. tracking params)". This trades perfect precision for a
-    conservative, explainable rule that doesn't fabricate a timestamp.
-    Combined with a bounded per-run crawl window (e.g. only the first N
-    items on a listing page, which are typically reverse-chronological),
-    this keeps false "fresh" positives low without ever inventing a date.
+    """Fallback for sources without reliable dates: an item counts as new if we
+    haven't seen its URL or its content hash before. The hash catches the same
+    article reposted under a different URL (tracking parameters, for example).
     """
     if seen_urls.contains(url):
         return False
@@ -110,11 +86,8 @@ def is_probably_new(url: str, seen_urls: "SeenUrlStore", *, content_hash: Option
 
 
 class SeenUrlStore:
-    """
-    Minimal interface for the "have we processed this before" check that
-    must hold across distributed crawler nodes. This in-memory/SQLite
-    version is for local runs; see architecture.pdf for the Redis-backed
-    design used at scale (shared SETs across worker nodes).
+    """In-memory record of URLs and content hashes already processed. A multi-node
+    setup would keep these in a shared Redis set instead (see docs/architecture.md).
     """
 
     def __init__(self, db_conn=None):

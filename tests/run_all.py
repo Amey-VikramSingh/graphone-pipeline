@@ -10,7 +10,7 @@ TEST_FILES = [
     "test_dates_logic.py",
     "test_orchestrator_logic.py",
     "test_jobs_logic.py",
-    "test_review_fixes.py",
+    "test_with_real_libraries.py",
 ]
 
 def main():

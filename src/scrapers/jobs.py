@@ -1,46 +1,20 @@
-"""
-Jobs vertical (Phase II).
+"""Job postings from AI companies' own careers boards.
 
-Design decision (documented, not hidden): rather than scraping generic
-"AI job board" aggregator sites -- which are mostly JS-rendered listing
-pages with no clean API and a much higher anti-bot burden -- this module
-sources AI job postings directly from AI companies' own ATS-hosted
-career boards on Greenhouse and Lever. Both platforms expose public,
-unauthenticated, structured JSON APIs that the companies' own careers
-pages call client-side, so this is the same data the public website
-shows, just read directly. Ashby (used by OpenAI, Cohere and ElevenLabs)
-is supported the same way. This keeps Phase II's job data 100%
-structured and traceable to a real posting URL, consistent with this
-project's "never fabricate a field" rule, and reserves the anti-bot
-tooling (Phase V) for sources that genuinely require it.
+Rather than scraping job aggregator sites, this reads the public JSON APIs
+behind each company's careers page on Greenhouse, Lever and Ashby. It's the
+same data the careers page shows, without fighting bot protection.
 
-Board tokens below were verified live on 2026-11-14 (each returned HTTP
-200 with postings). Companies move between ATS providers -- OpenAI and
-Cohere moved from Greenhouse to Ashby, and Hugging Face has no public
-board on any of the three -- so re-check if a board starts returning 404:
-  - Greenhouse: visit the company's careers page, look for a request to
-    `boards-api.greenhouse.io/v1/boards/<TOKEN>/jobs` in devtools, or
-    check if `https://boards.greenhouse.io/<TOKEN>` redirects/loads.
-  - Lever: check if `https://jobs.lever.co/<TOKEN>` loads, or look for
-    a request to `api.lever.co/v0/postings/<TOKEN>` in devtools.
-  - Ashby: check if `https://jobs.ashbyhq.com/<TOKEN>` loads, or call
-    `api.ashbyhq.com/posting-api/job-board/<TOKEN>`.
-A board that 404s simply yields zero jobs for that company (handled
-gracefully, logged, does not crash the run) -- but do verify tokens
-before trusting the "5 AI job boards" coverage claim in a submission.
+Board tokens were checked on 2026-11-14. Companies switch providers now and
+then (OpenAI and Cohere moved from Greenhouse to Ashby), so if a board starts
+returning 404, look up the new token in the careers page's network requests:
+  - Greenhouse: boards-api.greenhouse.io/v1/boards/<token>/jobs
+  - Lever:      api.lever.co/v0/postings/<token>
+  - Ashby:      api.ashbyhq.com/posting-api/job-board/<token>
+A board that 404s just yields no jobs and a log line.
 
-Freshness handling (the Phase II "Freshness Challenge"):
-  - Lever's `createdAt` field is a genuine original-posting timestamp
-    (epoch ms) -- reliable for the 24h freshness check on its own.
-  - Ashby's `publishedAt` is likewise the original publish time.
-  - Greenhouse's public boards API only exposes `updated_at`, which can
-    be touched by a recruiter editing an old posting WITHOUT it being a
-    new posting -- an unreliable freshness signal on its own. To guard
-    against false "fresh" positives from Greenhouse, freshness there is
-    the AND of (a) `updated_at` within the last 24h AND (b) the job URL
-    has not been seen by this crawler before (via `SeenUrlStore`/
-    `PipelineDB.is_seen`). This is the fallback heuristic for sources whose
-    date signal isn't fully trustworthy.
+Freshness: Lever's createdAt and Ashby's publishedAt are real posting times.
+Greenhouse only exposes updated_at, which also changes when a recruiter edits
+an old post, so a Greenhouse job must also have a URL we haven't seen before.
 """
 from __future__ import annotations
 
@@ -68,7 +42,7 @@ ASHBY_JOBS_URL_TMPL = "https://api.ashbyhq.com/posting-api/job-board/{token}"
 @dataclass
 class JobBoardConfig:
     platform: str        # "greenhouse" | "lever" | "ashby"
-    board_token: str      # verified 2026-11-14 -- see module docstring
+    board_token: str      # checked 2026-11-14
     company_display_name: str
 
 
@@ -83,9 +57,7 @@ DEFAULT_JOB_BOARDS: List[JobBoardConfig] = [
 ]
 
 # --------------------------------------------------------------------------
-# Deterministic role-family classification (keyword-based, no LLM needed --
-# faster, free, and avoids introducing any hallucination risk into a field
-# that's cheaply solvable with a keyword map).
+# Role family from title keywords. A lookup table is enough here.
 # --------------------------------------------------------------------------
 
 _ROLE_FAMILY_KEYWORDS = [
@@ -105,9 +77,7 @@ _ROLE_FAMILY_KEYWORDS = [
 
 
 def classify_role_family(title: str) -> str:
-    """Deterministic keyword classifier. Returns 'Other' rather than
-    guessing when no keyword matches -- consistent with the project's
-    'never fabricate, degrade to unknown' rule."""
+    """Map a job title to a role family by keyword, or 'Other' if nothing matches."""
     if not title:
         return "Other"
     lowered = title.lower()
@@ -131,9 +101,7 @@ def detect_is_remote(location_text: str, explicit_flag: Optional[bool] = None) -
 # --------------------------------------------------------------------------
 
 def _parse_greenhouse_job(job: dict, board: JobBoardConfig) -> Optional[dict]:
-    """Pure parsing of one Greenhouse job object (public boards API shape:
-    id, title, updated_at, location.name, absolute_url, ...). Returns None
-    if required fields are missing -- never fabricates a title/url."""
+    """Parse one Greenhouse job. Returns None if the title or URL is missing."""
     title = job.get("title")
     job_url = job.get("absolute_url")
     if not title or not job_url:
@@ -143,7 +111,7 @@ def _parse_greenhouse_job(job: dict, board: JobBoardConfig) -> Optional[dict]:
         "company": board.company_display_name,
         "title": title.strip(),
         "url": job_url,
-        "date_raw": job.get("updated_at"),   # see module docstring: unreliable alone, layered below
+        "date_raw": job.get("updated_at"),   # also changes on edits; see passes_freshness
         "location_raw": location,
         "is_remote_explicit": None,
         "date_confidence": "weak_updated_at_only",
@@ -173,9 +141,7 @@ async def fetch_greenhouse_jobs(client: "httpx.AsyncClient", board: JobBoardConf
 # --------------------------------------------------------------------------
 
 def _parse_lever_job(job: dict, board: JobBoardConfig) -> Optional[dict]:
-    """Pure parsing of one Lever posting object (public postings API shape:
-    text, hostedUrl, categories.location, workplaceType, createdAt (epoch
-    ms), ...). Returns None if required fields are missing."""
+    """Parse one Lever posting. Returns None if required fields are missing."""
     title = job.get("text")
     job_url = job.get("hostedUrl") or job.get("applyUrl")
     if not title or not job_url:
@@ -222,9 +188,7 @@ async def fetch_lever_jobs(client: "httpx.AsyncClient", board: JobBoardConfig) -
 # --------------------------------------------------------------------------
 
 def _parse_ashby_job(job: dict, board: JobBoardConfig) -> Optional[dict]:
-    """Pure parsing of one Ashby posting (public posting API shape: title,
-    jobUrl, location, isRemote, workplaceType, publishedAt, isListed, ...).
-    Returns None if required fields are missing or the posting is unlisted."""
+    """Parse one Ashby posting. Returns None if fields are missing or it's unlisted."""
     title = job.get("title")
     job_url = job.get("jobUrl") or job.get("applyUrl")
     if not title or not job_url or job.get("isListed") is False:
@@ -275,8 +239,7 @@ async def fetch_ashby_jobs(client: "httpx.AsyncClient", board: JobBoardConfig) -
 # --------------------------------------------------------------------------
 
 def to_record(raw: dict) -> Optional[JobRecord]:
-    """Validate+convert. Drops (logs) rather than fabricates a missing
-    required field (company/date/url)."""
+    """Build a JobRecord, or return None (and log) if company, date or URL is missing."""
     from utils.dates import normalize_date
 
     parsed_date = normalize_date(raw.get("date_raw"))
@@ -301,11 +264,8 @@ def to_record(raw: dict) -> Optional[JobRecord]:
 
 
 def passes_freshness(raw: dict, parsed_date, *, db=None, now=None) -> bool:
-    """
-    Layered freshness check. Strong-signal sources (Lever `createdAt`)
-    are trusted on the timestamp alone. Weak-signal sources (Greenhouse
-    `updated_at`) additionally require that the URL has not been seen by
-    this crawler before, per the module docstring's rationale.
+    """Lever and Ashby: the timestamp is enough. Greenhouse: the timestamp must be
+    recent and the URL must be new to this crawler.
     """
     if not is_within_freshness_window(parsed_date, now=now):
         return False
@@ -316,12 +276,10 @@ def passes_freshness(raw: dict, parsed_date, *, db=None, now=None) -> bool:
 
 
 async def run_jobs_pipeline(boards: Optional[List[JobBoardConfig]] = None, db=None) -> List[JobRecord]:
-    """
-    Fetches jobs from all configured boards, applies the layered
-    freshness check, marks fresh URLs as seen (so a Greenhouse posting
-    that merely gets touched again next run doesn't re-qualify as
-    fresh), and returns validated JobRecords for postings within the
-    last 24 hours only.
+    """Fetch every board and return JobRecords for postings from the last 24 hours.
+
+    Fresh URLs are marked as seen, so a Greenhouse post that gets edited later
+    doesn't count as new again.
     """
     if httpx is None:
         raise RuntimeError("httpx is not installed; pip install -r requirements.txt")

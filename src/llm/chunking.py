@@ -1,20 +1,9 @@
-"""
-Token-aware chunking so payloads never trigger 413 (Payload Too Large)
-while retaining the most semantically dense content.
+"""Split text into pieces that fit a model's token budget.
 
-Strategy:
-1. Prefer structural splitting (headings / paragraph boundaries) over
-   blind character slicing, so we don't cut a sentence — and therefore
-   a fact — in half.
-2. If a single semantic block is *itself* too large (e.g. one giant
-   paragraph), fall back to sliding-window token slicing with overlap
-   so no information sits entirely inside a truncation boundary.
-3. Density heuristic: for extraction tasks we don't need the whole
-   document — boilerplate (nav text, cookie banners, footers) is
-   stripped before chunking, and for very long documents we bias
-   toward the first N and last M tokens plus any block containing
-   extraction-relevant keywords (dates, numbers, entity-like capitalized
-   phrases), since that's where the target fields usually live.
+Paragraphs are kept together where possible, so a fact isn't cut in half.
+A paragraph that is too big on its own is split with a sliding window that
+overlaps neighbouring pieces. Page boilerplate (navigation, cookie banners,
+footers) is removed first.
 """
 from __future__ import annotations
 
@@ -41,8 +30,7 @@ if tiktoken is not None:
 def count_tokens(text: str) -> int:
     if _ENCODER is not None:
         return len(_ENCODER.encode(text, disallowed_special=()))
-    # Fallback approximation (~4 chars/token) when tiktoken isn't installed,
-    # so this module still degrades gracefully rather than hard-crashing.
+    # Rough estimate (about 4 characters per token) when tiktoken isn't available.
     return max(1, len(text) // 4)
 
 
@@ -74,13 +62,11 @@ def chunk_text(
     overlap_tokens: int = 200,
     strip_noise: bool = True,
 ) -> ChunkPlan:
-    """
-    Split `text` into chunks that each fit under `max_tokens_per_chunk`,
-    which should be set comfortably below the target model's context
-    window and below the provider's payload-size limit (the two are not
-    the same thing — provider payload caps can bite even on models with
-    large context windows, hence keeping this configurable per-provider
-    in llm/orchestrator.py).
+    """Split `text` into chunks of at most `max_tokens_per_chunk` tokens.
+
+    Keep the budget below both the model's context window and the provider's
+    request-size limit; they differ, which is why the orchestrator sets the
+    budget per provider.
     """
     if strip_noise:
         text = strip_boilerplate(text)
@@ -89,8 +75,7 @@ def chunk_text(
     if total_tokens <= max_tokens_per_chunk:
         return ChunkPlan(chunks=[text], strategy="single")
 
-    # Structural split: paragraphs first, then merge greedily up to the
-    # token budget so we keep semantically coherent blocks together.
+    # Split on paragraphs, then merge neighbours until the budget is reached.
     paragraphs = [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
 
     chunks: List[str] = []
@@ -109,7 +94,7 @@ def chunk_text(
 
         if para_tokens > max_tokens_per_chunk:
             # A single paragraph is too big on its own (e.g. dumped raw
-            # HTML text blob) — sliding-window it with overlap.
+            # HTML text blob): sliding-window it with overlap.
             flush()
             used_sliding_window = True
             words = para.split()
