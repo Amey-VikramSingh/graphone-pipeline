@@ -135,7 +135,7 @@ async def iter_arxiv_papers(config: ScraperConfig) -> AsyncIterator[dict]:
     seen_urls: set[str] = set()
     yielded = 0
 
-    async with httpx.AsyncClient(headers={"User-Agent": "GraphOne-Intelligence-Graph/1.0 (research contact: data-eng@graphone.example)"}) as client:
+    async with httpx.AsyncClient(headers={"User-Agent": "graphone-pipeline/1.0 (+https://github.com/Amey-VikramSingh/graphone-pipeline)"}) as client:
         for category in config.categories:
             start = 0
             while yielded < config.target_count:
@@ -245,7 +245,7 @@ async def run_research_papers_pipeline(config: Optional[ScraperConfig] = None) -
     sem = asyncio.Semaphore(config.max_concurrent_github_calls)
     records: List[ResearchPaperRecord] = []
 
-    async with httpx.AsyncClient(headers={"User-Agent": "GraphOne-Intelligence-Graph/1.0"}) as gh_client:
+    async with httpx.AsyncClient(headers={"User-Agent": "graphone-pipeline/1.0 (+https://github.com/Amey-VikramSingh/graphone-pipeline)"}) as gh_client:
         enrich_tasks = []
         async for raw_paper in iter_arxiv_papers(config):
             enrich_tasks.append(enrich_with_github(raw_paper, gh_client, sem, config.github_token))

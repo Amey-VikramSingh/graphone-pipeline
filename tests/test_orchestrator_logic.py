@@ -1,7 +1,7 @@
 """
 Exercises orchestrator.py's control flow (fallback chain, 429 backoff,
-413 rechunk-and-retry, schema validation gating) against fakes, since
-litellm/pydantic can't be installed in this sandbox. Run with:
+413 rechunk-and-retry, schema validation gating) against fakes, so it
+runs without litellm or pydantic installed. Run with:
     python3 tests/test_orchestrator_logic.py
 """
 import asyncio

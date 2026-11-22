@@ -39,8 +39,8 @@ Freshness handling (the Phase II "Freshness Challenge"):
     against false "fresh" positives from Greenhouse, freshness there is
     the AND of (a) `updated_at` within the last 24h AND (b) the job URL
     has not been seen by this crawler before (via `SeenUrlStore`/
-    `PipelineDB.is_seen`). This is exactly the "intelligent heuristic"
-    the brief asks for when a source's date signal isn't fully trustworthy.
+    `PipelineDB.is_seen`). This is the fallback heuristic for sources whose
+    date signal isn't fully trustworthy.
 """
 from __future__ import annotations
 
@@ -72,8 +72,8 @@ class JobBoardConfig:
     company_display_name: str
 
 
-# "5 AI job boards" per the brief, sourced as 5 AI companies' own ATS
-# boards. Verified live 2026-11-14 -- see module docstring.
+# Five AI companies' own applicant-tracking boards, verified live on
+# 2026-11-14 (see the module docstring).
 DEFAULT_JOB_BOARDS: List[JobBoardConfig] = [
     JobBoardConfig(platform="ashby", board_token="openai", company_display_name="OpenAI"),
     JobBoardConfig(platform="greenhouse", board_token="anthropic", company_display_name="Anthropic"),
@@ -330,7 +330,7 @@ async def run_jobs_pipeline(boards: Optional[List[JobBoardConfig]] = None, db=No
     from utils.dates import normalize_date
 
     all_raw: List[dict] = []
-    async with httpx.AsyncClient(headers={"User-Agent": "GraphOne-Intelligence-Graph/1.0"}) as client:
+    async with httpx.AsyncClient(headers={"User-Agent": "graphone-pipeline/1.0 (+https://github.com/Amey-VikramSingh/graphone-pipeline)"}) as client:
         for board in boards:
             if board.platform == "greenhouse":
                 jobs = await fetch_greenhouse_jobs(client, board)

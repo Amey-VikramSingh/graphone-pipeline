@@ -1,8 +1,7 @@
 """
-Canonical output schemas for GraphOne / FrontierAtlas ingestion pipeline.
+Canonical output schemas for the ingestion pipeline.
 
-These map 1:1 to the schemas specified in the assessment brief. Every
-scraper/LLM-extractor in this repo must produce records that validate
+Every scraper/LLM-extractor in this repo must produce records that validate
 against one of these models before they are persisted or exported.
 Validation failure = the record is dropped and logged, never guessed at.
 """
@@ -159,8 +158,7 @@ class JobRecord(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# News (not explicitly schema'd in the brief beyond "News" tab — modeled
-# consistently with Job/ResearchPaper conventions)
+# News (modeled consistently with the Job and ResearchPaper conventions)
 # ---------------------------------------------------------------------------
 
 class NewsContent(BaseModel):

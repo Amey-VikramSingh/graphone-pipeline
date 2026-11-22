@@ -5,12 +5,10 @@ Primary source: Y Combinator's public company directory, which serves
 a JSON payload (Algolia-backed search index) behind its /companies
 page. This is a real, structured, high-volume source that does not
 require LLM extraction or anti-bot evasion for the bulk of the target
-1,000 records -- reserving the LLM extraction engine (Phase III) and
-anti-bot tooling (Phase V) for sources that genuinely need them, per
-the brief's evaluation criteria (Data Quality rewards precision; a
-hallucinated employeeCount from an LLM guess on a page that already
-has the real number in a JSON field is a worse outcome than just
-reading the field).
+1,000 records, so the LLM extraction engine and anti-bot tooling are
+kept for sources that genuinely need them. Precision matters more than
+coverage: an employeeCount guessed by an LLM on a page that already has
+the real number in a JSON field is worse than just reading the field.
 
 Not built yet: a secondary, HTML-only source routed through the LLM
 orchestrator (llm/orchestrator.py) to diversify beyond YC. YC is the
@@ -37,11 +35,10 @@ logger = logging.getLogger("graphone.scrapers.startups")
 # keys are meant to be public/client-exposed, scoped to read-only search
 # on specific indices; this is not a private/authenticated endpoint).
 #
-# IMPORTANT -- DO NOT TRUST A HARDCODED KEY HERE: Algolia app IDs/search
-# keys of this kind can rotate, and I have not verified a live value
-# against the real site from this sandbox (no network access). Do not
-# ship a guessed key -- that is exactly the kind of unverified value
-# this project's "no hallucination" rule exists to prevent. Populate
+# No key is hardcoded here: Algolia app IDs and search keys of this kind
+# rotate. Do not ship a guessed key -- that is exactly the kind of
+# unverified value this project's "no hallucination" rule exists to
+# prevent. Populate
 # these from environment variables after retrieving the real values
 # yourself: open ycombinator.com/companies with browser devtools ->
 # Network tab -> filter "algolia.net" -> copy the `x-algolia-application-id`
@@ -95,7 +92,7 @@ async def _fetch_yc_page(client: "httpx.AsyncClient", cfg: AlgoliaConfig, page: 
     """
     One page of YC's company search index. `tags` can filter to e.g.
     ["Artificial Intelligence"] to bias the sample toward the AI/venture
-    vertical this graph cares about, matching the brief's domain focus.
+    vertical this graph cares about.
     """
     body = {"requests": [{"indexName": YC_INDEX_NAME, "params": build_algolia_params(page, tags)}]}
     headers = {

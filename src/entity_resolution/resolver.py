@@ -27,7 +27,7 @@ from typing import Dict, List, Optional
 try:
     from rapidfuzz import fuzz as _rf_fuzz
     _HAS_RAPIDFUZZ = True
-except ImportError:  # pragma: no cover - graceful degrade for sandbox/testing
+except ImportError:  # pragma: no cover - fall back to difflib without rapidfuzz
     import difflib
     _HAS_RAPIDFUZZ = False
 
@@ -86,7 +86,7 @@ class ResolutionResult:
 class EntityResolver:
     """
     seed_entities: dict of canonical_name -> list of known aliases
-    (the "mock database of ~50 known AI startups" from the brief).
+    (a seed list of about 50 well-known AI companies).
     """
     seed_entities: Dict[str, List[str]] = field(default_factory=dict)
     threshold: float = FUZZY_MATCH_THRESHOLD
@@ -187,7 +187,7 @@ class EntityResolver:
 
 
 # ---------------------------------------------------------------------------
-# Seed data: mock DB of known AI startups (brief asks for ~50)
+# Seed data: well-known AI companies and their common aliases
 # ---------------------------------------------------------------------------
 
 SEED_STARTUPS: Dict[str, List[str]] = {

@@ -1,7 +1,6 @@
 """
-Tests for the fixes from the 2026-11 code review. Unlike the older test
-modules, these use the real installed libraries (pydantic, litellm, ...),
-not the sandbox fakes in _fakes.py. Run with:
+Tests that use the real installed libraries (pydantic, litellm, ...)
+rather than the fakes in _fakes.py. Run with:
     python tests/test_review_fixes.py
 """
 import asyncio

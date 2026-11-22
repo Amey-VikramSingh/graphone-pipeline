@@ -40,7 +40,7 @@ AI_NEWS_FEEDS = [
 
 # Below this, extracted page text is treated as a failed extraction.
 MIN_ARTICLE_CHARS = 300
-USER_AGENT = "GraphOne-Intelligence-Graph/1.0 (+news ingestion)"
+USER_AGENT = "graphone-pipeline/1.0 (+https://github.com/Amey-VikramSingh/graphone-pipeline)"
 
 
 def _feed_text(entry: dict) -> str:

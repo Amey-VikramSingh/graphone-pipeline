@@ -26,7 +26,7 @@ def test_iso_fast_path():
 
 
 def test_relative_date_without_dateparser_raises_clearly():
-    # In this sandbox dateparser isn't installed; confirm the failure mode
+    # Without dateparser installed, confirm the failure mode
     # is a clear, actionable RuntimeError and NOT a silently-wrong date.
     try:
         normalize_date("2 hours ago")
