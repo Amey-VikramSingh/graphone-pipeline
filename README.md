@@ -21,7 +21,7 @@ instead of crashing it.
 |---|---|---|
 | Research papers | arXiv API (cs.AI, cs.LG, cs.CL, cs.CV, stat.ML, cs.NE) | GitHub repo links found in the abstract and comments, then star counts from the GitHub API |
 | Products | Product Hunt GraphQL API | Pricing model classified by an LLM |
-| Startups | Y Combinator company directory (Algolia index) | Structured data, no LLM needed |
+| Startups | Wikidata SPARQL endpoint (CC0) | Companies whose industry is AI or machine learning; no key or LLM needed |
 | Jobs | Greenhouse, Lever and Ashby boards (OpenAI, Anthropic, Scale AI, Cohere, ElevenLabs) | Only postings from the last 24 hours |
 | News | RSS: TechCrunch AI, CSET, BAIR, NVIDIA, AWS ML | Article text extracted from HTML; only the last 24 hours |
 
@@ -102,13 +102,9 @@ is also written to the `run_log` table.
 | `GEMINI_API_KEY`, `GROQ_API_KEY`, `DEEPSEEK_API_KEY` | LLM fallback chain | Product pricing is recorded as `UNKNOWN` |
 | `GITHUB_TOKEN` | Star counts for papers | Falls back to unauthenticated GitHub (60 requests/hour) |
 | `PRODUCTHUNT_API_TOKEN` | Products | The products phase is skipped with an error |
-| `YC_ALGOLIA_APP_ID`, `YC_ALGOLIA_API_KEY` | Startups | The startups phase is skipped with an error |
 | `GOOGLE_SERVICE_ACCOUNT_JSON`, `TARGET_SHEET_URL` | Sheets export | Export is skipped with a warning |
 
-Jobs and news need no credentials. The YC values are the public, read-only
-search keys the directory page itself uses: open ycombinator.com/companies,
-filter the browser's network tab for `algolia.net`, and copy the
-`x-algolia-application-id` and `x-algolia-api-key` headers.
+Startups, jobs and news need no credentials.
 
 `truststore` (in `requirements.txt`) makes Python use the operating system's
 certificate store, so machines whose antivirus or proxy re-signs HTTPS traffic
@@ -125,16 +121,16 @@ python tests/run_all.py
 | `test_dates_logic.py` | Date parsing, the 24-hour window, the seen-URL store |
 | `test_orchestrator_logic.py` | Fallback chain, 429 backoff, 413 rechunking (with fakes) |
 | `test_jobs_logic.py` | Role classification, remote detection, Greenhouse and Lever parsing |
-| `test_review_fixes.py` | Ashby parsing, entity resolution, HTML extraction, dead-provider skipping, CLI |
+| `test_review_fixes.py` | Ashby parsing, Wikidata queries and parsing, entity resolution, HTML extraction, dead-provider skipping, CLI |
 
 The tests run offline in CI. The scrapers' HTTP calls aren't mocked, so check
 them with a small live run.
 
 ## Status
 
-Papers, products, jobs and news have been run against the live APIs. The
-startups phase and the Sheets export need the credentials above before a full
-run.
+Every source has been run against its live API. Startups returned the full
+1,000 records from Wikidata in about 40 seconds. Product pricing needs a working
+LLM key, and the Sheets export needs a Google service account.
 
 ## License
 

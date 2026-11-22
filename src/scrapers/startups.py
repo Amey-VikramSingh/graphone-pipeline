@@ -1,23 +1,23 @@
 """
 Startups vertical.
 
-Primary source: Y Combinator's public company directory, which serves
-a JSON payload (Algolia-backed search index) behind its /companies
-page. This is a real, structured, high-volume source that does not
-require LLM extraction or anti-bot evasion for the bulk of the target
-1,000 records, so the LLM extraction engine and anti-bot tooling are
-kept for sources that genuinely need them. Precision matters more than
-coverage: an employeeCount guessed by an LLM on a page that already has
-the real number in a JSON field is worse than just reading the field.
+Source: Wikidata, queried through its public SPARQL endpoint. Wikidata's
+data is CC0 (public domain) and the query service is meant for automated
+use, so no key or scraping is involved. The query selects organizations
+whose industry (P452) is artificial intelligence or machine learning and
+whose type (P31, or one subclass step up) is a kind of company. Entries
+such as research institutes, associations and software products share
+the industry tag but are filtered out by type.
 
-Not built yet: a secondary, HTML-only source routed through the LLM
-orchestrator (llm/orchestrator.py) to diversify beyond YC. YC is the
-only startups source today.
+Every field comes straight from a Wikidata statement. Employee counts are
+only present for a minority of companies; when the statement is missing,
+employeeCount stays None rather than being estimated.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
-from typing import List, Optional
+from typing import Iterable, List, Optional
 
 try:
     import httpx
@@ -29,130 +29,168 @@ from entity_resolution.resolver import EntityResolver
 
 logger = logging.getLogger("graphone.scrapers.startups")
 
-# YC's public /companies directory is backed by an Algolia search index
-# called client-side, with a read-only "search-only" API key embedded
-# in the page's JS bundle (this is standard Algolia practice -- search
-# keys are meant to be public/client-exposed, scoped to read-only search
-# on specific indices; this is not a private/authenticated endpoint).
-#
-# No key is hardcoded here: Algolia app IDs and search keys of this kind
-# rotate. Do not ship a guessed key -- that is exactly the kind of
-# unverified value this project's "no hallucination" rule exists to
-# prevent. Populate
-# these from environment variables after retrieving the real values
-# yourself: open ycombinator.com/companies with browser devtools ->
-# Network tab -> filter "algolia.net" -> copy the `x-algolia-application-id`
-# and `x-algolia-api-key` request headers from a live request.
-import json
-import os
-from dataclasses import dataclass
-from urllib.parse import urlencode
+WIKIDATA_SPARQL_URL = "https://query.wikidata.org/sparql"
+WIKIDATA_ENTITY_BASE = "https://www.wikidata.org/wiki/"
+# Wikidata's User-Agent policy asks for a descriptive agent with a contact URL.
+USER_AGENT = "graphone-pipeline/1.0 (+https://github.com/Amey-VikramSingh/graphone-pipeline)"
 
-YC_COMPANY_PAGE_BASE = "https://www.ycombinator.com/companies/"
-YC_INDEX_NAME = os.environ.get("YC_ALGOLIA_INDEX", "YCCompany_production")
+PAGE_SIZE = 200
+MAX_RETRIES = 4
 
-PAGE_SIZE = 100
-
-
-@dataclass(frozen=True)
-class AlgoliaConfig:
-    url: str
-    app_id: str
-    api_key: str
+# Industry (P452) values: artificial intelligence, machine learning.
+AI_INDUSTRIES = ("Q11660", "Q2539")
+# Instance-of (P31) values that mean "a company". Matched directly or one
+# subclass step up, which covers e.g. "software company" and "startup company"
+# without the full subclass walk that times out on the public endpoint.
+COMPANY_TYPES = (
+    "Q4830453",   # business
+    "Q783794",    # company
+    "Q6881511",   # enterprise
+    "Q20825628",  # startup company
+    "Q891723",    # public company
+    "Q1589009",   # privately held company
+    "Q658255",    # subsidiary
+    "Q18388277",  # technology company
+    "Q1058914",   # software company
+    "Q2995256",   # consulting company
+)
 
 
-def algolia_config_from_env() -> AlgoliaConfig:
+def build_company_ids_query(industries: Iterable[str] = AI_INDUSTRIES,
+                            company_types: Iterable[str] = COMPANY_TYPES) -> str:
+    """Every AI company's entity URI, in one request (about 1,100 rows)."""
+    ind = " ".join(f"wd:{q}" for q in industries)
+    types = " ".join(f"wd:{q}" for q in company_types)
+    return f"""
+SELECT DISTINCT ?company WHERE {{
+  VALUES ?industry {{ {ind} }}
+  VALUES ?type {{ {types} }}
+  ?company wdt:P452 ?industry ;
+           wdt:P31/wdt:P279? ?type .
+}}
+""".strip()
+
+
+def build_details_query(qids: Iterable[str]) -> str:
+    """English name, employee count and website for a batch of entity ids."""
+    values = " ".join(f"wd:{q}" for q in qids)
+    return f"""
+SELECT ?company (SAMPLE(?label) AS ?name) (MAX(?employees) AS ?employeeCount) (SAMPLE(?site) AS ?website)
+WHERE {{
+  VALUES ?company {{ {values} }}
+  ?company rdfs:label ?label . FILTER(LANG(?label) = "en")
+  OPTIONAL {{ ?company wdt:P1128 ?employees . }}
+  OPTIONAL {{ ?company wdt:P856 ?site . }}
+}}
+GROUP BY ?company
+""".strip()
+
+
+def _qid(uri: str) -> Optional[str]:
+    qid = uri.rsplit("/", 1)[-1]
+    return qid if qid.startswith("Q") and qid[1:].isdigit() else None
+
+
+def _binding_value(row: dict, key: str) -> Optional[str]:
+    value = row.get(key, {}).get("value")
+    return value.strip() if isinstance(value, str) and value.strip() else None
+
+
+def parse_binding(row: dict) -> Optional[dict]:
     """
-    Read the Algolia settings when they're needed, not at import time, so
-    values loaded from .env by the entry point are seen. YC_ALGOLIA_URL is
-    optional: Algolia's multi-query endpoint is derived from the app id.
+    One SPARQL result row -> raw startup dict. Returns None when the row
+    lacks an entity URI or an English name (the minimum for a record).
     """
-    app_id = os.environ.get("YC_ALGOLIA_APP_ID", "").strip()
-    api_key = os.environ.get("YC_ALGOLIA_API_KEY", "").strip()
-    url = os.environ.get("YC_ALGOLIA_URL", "").strip() or (
-        f"https://{app_id.lower()}-dsn.algolia.net/1/indexes/*/queries" if app_id else ""
-    )
-    return AlgoliaConfig(url=url, app_id=app_id, api_key=api_key)
-
-
-def build_algolia_params(page: int, tags: Optional[List[str]] = None) -> str:
-    """
-    Algolia's `params` is a URL-encoded query string. Values must be encoded:
-    a tag like "Artificial Intelligence" contains a space, which broke the
-    previous hand-built string.
-    """
-    params = {"query": "", "page": page, "hitsPerPage": PAGE_SIZE}
-    if tags:
-        params["facetFilters"] = json.dumps([[f"industry:{t}" for t in tags]])
-    return urlencode(params)
-
-
-async def _fetch_yc_page(client: "httpx.AsyncClient", cfg: AlgoliaConfig, page: int,
-                         tags: Optional[List[str]] = None) -> dict:
-    """
-    One page of YC's company search index. `tags` can filter to e.g.
-    ["Artificial Intelligence"] to bias the sample toward the AI/venture
-    vertical this graph cares about.
-    """
-    body = {"requests": [{"indexName": YC_INDEX_NAME, "params": build_algolia_params(page, tags)}]}
-    headers = {
-        "X-Algolia-Application-Id": cfg.app_id,
-        "X-Algolia-API-Key": cfg.api_key,
-        "Content-Type": "application/json",
-    }
-    resp = await client.post(cfg.url, headers=headers, json=body, timeout=20.0)
-    resp.raise_for_status()
-    return resp.json()
-
-
-def _parse_yc_hit(hit: dict) -> Optional[dict]:
-    """
-    hit is one Algolia record from YC's index. Field names below match
-    YC's public index schema (name, slug, team_size, one_liner, etc.).
-    Returns None if the record lacks the minimum required fields.
-    """
-    slug = hit.get("slug")
-    name = hit.get("name")
-    if not slug or not name:
+    uri = _binding_value(row, "company")
+    name = _binding_value(row, "name")
+    if not uri or not name or not uri.startswith("http"):
         return None
+    qid = _qid(uri)
+    if qid is None:
+        return None
+
+    employees: Optional[int] = None
+    raw_count = _binding_value(row, "employeeCount")
+    if raw_count is not None:
+        try:
+            employees = int(float(raw_count))
+        except ValueError:
+            employees = None
+        if employees is not None and employees < 0:
+            employees = None
+
     return {
-        "entityName": name.strip(),
-        "employeeCount": hit.get("team_size"),
-        "source_url": f"{YC_COMPANY_PAGE_BASE}{slug}",
-        "one_liner": hit.get("one_liner"),
-        "industries": hit.get("industries", []),
+        "entityName": name,
+        "employeeCount": employees,
+        "source_url": f"{WIKIDATA_ENTITY_BASE}{qid}",
+        "website": _binding_value(row, "website"),
     }
 
 
-async def iter_yc_startups(target_count: int = 1000, tags: Optional[List[str]] = None):
+async def _run_query(client: "httpx.AsyncClient", query: str) -> List[dict]:
+    """POST one query, retrying 429 and 5xx with backoff (honours Retry-After)."""
+    delay = 2.0
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            resp = await client.post(
+                WIKIDATA_SPARQL_URL,
+                data={"query": query},
+                headers={"Accept": "application/sparql-results+json"},
+                timeout=90.0,
+            )
+        except httpx.TransportError as e:
+            if attempt == MAX_RETRIES:
+                raise
+            logger.warning("Wikidata request failed (%s); retrying in %.0fs", e, delay)
+        else:
+            if resp.status_code == 429 or resp.status_code >= 500:
+                if attempt == MAX_RETRIES:
+                    resp.raise_for_status()
+                retry_after = resp.headers.get("Retry-After", "")
+                wait = float(retry_after) if retry_after.isdigit() else delay
+                logger.warning("Wikidata returned %d; retrying in %.0fs", resp.status_code, wait)
+                await asyncio.sleep(wait)
+                delay *= 2
+                continue
+            resp.raise_for_status()
+            return resp.json().get("results", {}).get("bindings", [])
+        await asyncio.sleep(delay)
+        delay *= 2
+    return []
+
+
+async def iter_ai_startups(target_count: int = 1000):
     if httpx is None:
         raise RuntimeError("httpx is not installed; pip install -r requirements.txt")
-    cfg = algolia_config_from_env()
-    if not (cfg.app_id and cfg.api_key):
-        raise RuntimeError(
-            "YC_ALGOLIA_APP_ID / YC_ALGOLIA_API_KEY are not set. "
-            "These must be captured from a live browser session against "
-            "ycombinator.com/companies (see comment above) -- refusing to "
-            "guess them rather than silently sending a broken/fabricated request."
-        )
 
-    yielded = 0
-    page = 0
-    async with httpx.AsyncClient() as client:
-        while yielded < target_count:
-            data = await _fetch_yc_page(client, cfg, page, tags)
-            hits = data.get("results", [{}])[0].get("hits", [])
-            if not hits:
+    async with httpx.AsyncClient(headers={"User-Agent": USER_AGENT}) as client:
+        id_rows = await _run_query(client, build_company_ids_query())
+        # Sort by numeric id so runs are repeatable and older, better-documented
+        # entries come first.
+        qids = sorted({q for r in id_rows if (q := _qid(_binding_value(r, "company") or ""))},
+                      key=lambda q: int(q[1:]))
+        logger.info("Wikidata lists %d AI companies", len(qids))
+
+        yielded = 0
+        for i in range(0, len(qids), PAGE_SIZE):
+            if yielded >= target_count:
                 break
-            for hit in hits:
-                parsed = _parse_yc_hit(hit)
+            if i:
+                # Wikidata asks clients not to send parallel or rapid-fire queries.
+                await asyncio.sleep(1.0)
+            rows = await _run_query(client, build_details_query(qids[i:i + PAGE_SIZE]))
+            rows.sort(key=lambda r: int((_qid(_binding_value(r, "company") or "") or "Q0")[1:]))
+            for row in rows:
+                parsed = parse_binding(row)
                 if parsed is None:
                     continue
                 yielded += 1
                 yield parsed
                 if yielded >= target_count:
                     break
-            page += 1
+
+    if yielded < target_count:
+        logger.info("Wikidata returned %d AI companies (target was %d)", yielded, target_count)
 
 
 def to_record(raw: dict, resolver: Optional[EntityResolver] = None, db=None) -> Optional[StartupRecord]:
@@ -189,7 +227,7 @@ def to_record(raw: dict, resolver: Optional[EntityResolver] = None, db=None) -> 
             data=StartupContentData(employeeCount=raw.get("employeeCount")),
         )
         return StartupRecord(
-            source=Source(name="ycombinator.com", url=raw["source_url"]),
+            source=Source(name="wikidata.org", url=raw["source_url"]),
             content=content,
         )
     except Exception as e:  # noqa: BLE001
@@ -199,9 +237,9 @@ def to_record(raw: dict, resolver: Optional[EntityResolver] = None, db=None) -> 
 
 
 async def run_startups_pipeline(target_count: int = 1000, resolver: Optional[EntityResolver] = None,
-                                 db=None, tags: Optional[List[str]] = None) -> List[StartupRecord]:
+                                 db=None) -> List[StartupRecord]:
     records: List[StartupRecord] = []
-    async for raw in iter_yc_startups(target_count=target_count, tags=tags):
+    async for raw in iter_ai_startups(target_count=target_count):
         record = to_record(raw, resolver=resolver, db=db)
         if record is not None:
             records.append(record)

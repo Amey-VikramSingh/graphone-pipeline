@@ -7,7 +7,6 @@ import asyncio
 import json
 import sys
 from pathlib import Path
-from urllib.parse import parse_qs
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
@@ -21,7 +20,9 @@ from scrapers.jobs import (  # noqa: E402
 from scrapers.news import _feed_text  # noqa: E402
 from scrapers.products import PricingExtraction  # noqa: E402
 from scrapers.research_papers import _extract_github_url_from_text, _parse_arxiv_entry  # noqa: E402
-from scrapers.startups import algolia_config_from_env, build_algolia_params  # noqa: E402
+from scrapers.startups import (  # noqa: E402
+    build_company_ids_query, build_details_query, parse_binding, to_record as startup_to_record,
+)
 from utils.dates import normalize_date  # noqa: E402
 from utils.html_text import html_to_text, strip_tags  # noqa: E402
 
@@ -103,25 +104,39 @@ def test_github_url_found_in_arxiv_comment():
     print("PASS: arXiv comment field is parsed and its GitHub link extracted")
 
 
-def test_algolia_params_are_url_encoded(monkeypatch_env=None):
-    params = parse_qs(build_algolia_params(2, ["Artificial Intelligence"]))
-    assert params["page"] == ["2"] and params["hitsPerPage"] == ["100"]
-    assert json.loads(params["facetFilters"][0]) == [["industry:Artificial Intelligence"]]
-    assert "facetFilters" not in parse_qs(build_algolia_params(0))
+def test_wikidata_queries_and_parsing():
+    ids_query = build_company_ids_query()
+    assert "wdt:P452" in ids_query and "wd:Q11660" in ids_query and "wd:Q2539" in ids_query
+    assert "wdt:P31/wdt:P279?" in ids_query  # one subclass step, not the slow full walk
+    details = build_details_query(["Q1", "Q42"])
+    assert "VALUES ?company { wd:Q1 wd:Q42 }" in details and "wdt:P1128" in details
 
-    import os
-    saved = {k: os.environ.pop(k, None) for k in ("YC_ALGOLIA_URL", "YC_ALGOLIA_APP_ID", "YC_ALGOLIA_API_KEY")}
-    try:
-        os.environ["YC_ALGOLIA_APP_ID"] = "ABC123"
-        os.environ["YC_ALGOLIA_API_KEY"] = "k"
-        # read at call time (after .env is loaded), URL derived from the app id
-        assert algolia_config_from_env().url == "https://abc123-dsn.algolia.net/1/indexes/*/queries"
-    finally:
-        for k, v in saved.items():
-            os.environ.pop(k, None)
-            if v is not None:
-                os.environ[k] = v
-    print("PASS: Algolia params URL-encoded; config read lazily with derived URL")
+    def row(uri, name=None, employees=None, site=None):
+        r = {"company": {"type": "uri", "value": uri}}
+        if name is not None:
+            r["name"] = {"type": "literal", "value": name}
+        if employees is not None:
+            r["employeeCount"] = {"type": "literal", "value": employees}
+        if site is not None:
+            r["website"] = {"type": "uri", "value": site}
+        return r
+
+    full = parse_binding(row("http://www.wikidata.org/entity/Q21708200", "OpenAI", "4500", "https://openai.com/"))
+    assert full == {
+        "entityName": "OpenAI", "employeeCount": 4500,
+        "source_url": "https://www.wikidata.org/wiki/Q21708200", "website": "https://openai.com/",
+    }
+    # Missing employee count stays None; it is never estimated.
+    assert parse_binding(row("http://www.wikidata.org/entity/Q5", "Acme AI"))["employeeCount"] is None
+    assert parse_binding(row("http://www.wikidata.org/entity/Q6", "Bad", "lots"))["employeeCount"] is None
+    # No English name or no real entity id: dropped.
+    assert parse_binding(row("http://www.wikidata.org/entity/Q7")) is None
+    assert parse_binding(row("http://www.wikidata.org/entity/P31", "Not an item")) is None
+
+    record = startup_to_record(full, resolver=seeded_resolver())
+    assert record is not None and record.content.entityName == "OpenAI"
+    assert record.source.name == "wikidata.org" and record.content.data.employeeCount == 4500
+    print("PASS: Wikidata queries built; rows parsed without guessing missing fields")
 
 
 def test_html_to_text_extracts_article():
@@ -242,7 +257,7 @@ if __name__ == "__main__":
     test_ashby_parsing_and_freshness()
     test_default_boards_are_the_verified_set()
     test_github_url_found_in_arxiv_comment()
-    test_algolia_params_are_url_encoded()
+    test_wikidata_queries_and_parsing()
     test_html_to_text_extracts_article()
     test_pricing_extraction_tolerates_bad_shapes()
     test_unexpected_provider_error_falls_through_chain()
