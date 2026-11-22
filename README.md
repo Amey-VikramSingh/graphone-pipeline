@@ -3,12 +3,16 @@
 [![tests](https://github.com/Amey-VikramSingh/graphone-pipeline/actions/workflows/tests.yml/badge.svg)](https://github.com/Amey-VikramSingh/graphone-pipeline/actions/workflows/tests.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 ![Python 3.12](https://img.shields.io/badge/python-3.12-3776AB?logo=python&logoColor=white)
+[![Data: Google Sheet](https://img.shields.io/badge/data-Google%20Sheet-34A853?logo=googlesheets&logoColor=white)](https://docs.google.com/spreadsheets/d/1kJ6kOPlylsO9UD-tOW9UeRlYpGYAS53Wj19uPaYS2kU/edit?usp=sharing)
 
 A fault-tolerant ingestion pipeline for a knowledge graph of the AI ecosystem.
 It collects startups, products, research papers (with GitHub star counts), job
 postings and news, validates every record against a schema, links mentions of
 the same company together, and stores the results in SQLite with an optional
 Google Sheets export.
+
+**Results from the latest run:** [view the data in Google Sheets](https://docs.google.com/spreadsheets/d/1kJ6kOPlylsO9UD-tOW9UeRlYpGYAS53Wj19uPaYS2kU/edit?usp=sharing) (six tabs:
+startups, products, research papers, jobs, news and the entity mapping log).
 
 The interesting part is what happens when sources misbehave: APIs rate-limit,
 pages are too large for a model's context window, API keys expire, and some
@@ -128,7 +132,8 @@ them with a small live run.
 
 ## Status
 
-Latest full run (22 November 2026, default settings):
+Latest full run (22 November 2026, default settings), exported to
+[this Google Sheet](https://docs.google.com/spreadsheets/d/1kJ6kOPlylsO9UD-tOW9UeRlYpGYAS53Wj19uPaYS2kU/edit?usp=sharing):
 
 | Data | Records | Notes |
 |---|---|---|
