@@ -22,6 +22,7 @@ import asyncio
 import json
 import logging
 import random
+import re
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional, Type
 
@@ -112,9 +113,27 @@ def _disable(provider: "ProviderConfig", reason: str) -> None:
         logger.warning("Disabling %s for the rest of this run: %s", provider.model, reason)
 
 
+# Per-minute limits clear within seconds. Groq's TPM/RPM errors also end with an
+# upgrade link to ".../settings/billing", so they must be ruled out before the
+# quota markers are checked, or a routine wait would disable the provider.
+_PER_MINUTE_MARKERS = ("per minute", "(tpm)", "(rpm)")
+_RETRY_AFTER_RE = re.compile(r"try again in (?:(\d+)m)?(\d+(?:\.\d+)?)s", re.IGNORECASE)
+
+
 def _is_quota_exhausted(err: Exception) -> bool:
     text = str(err).lower()
+    if any(marker in text for marker in _PER_MINUTE_MARKERS):
+        return False
     return any(marker in text for marker in _QUOTA_MARKERS)
+
+
+def _suggested_wait(err: Exception) -> Optional[float]:
+    """Seconds the provider asked us to wait ("Please try again in 11.85s"), if it said."""
+    match = _RETRY_AFTER_RE.search(str(err))
+    if not match:
+        return None
+    minutes = float(match.group(1) or 0)
+    return minutes * 60 + float(match.group(2))
 
 
 def _backoff_delay(attempt: int, base: float, cap: float) -> float:
@@ -245,6 +264,10 @@ async def _extract_from_chunk_with_retry(
                 logger.warning("429 exhausted on %s for %s", provider.model, source_url)
                 return {"result": None, "trace": trace}
             delay = _backoff_delay(attempt, provider.base_backoff_seconds, provider.max_backoff_seconds)
+            suggested = _suggested_wait(e)
+            if suggested is not None:
+                # Wait as long as the provider asked (plus a little), capped.
+                delay = min(max(delay, suggested + 0.5), provider.max_backoff_seconds)
             logger.info("429 from %s (attempt %d), backing off %.2fs", provider.model, attempt + 1, delay)
             await asyncio.sleep(delay)
             continue

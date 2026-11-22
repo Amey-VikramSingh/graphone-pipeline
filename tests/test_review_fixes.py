@@ -239,9 +239,19 @@ def test_default_chain_uses_current_models():
     # Groq's daily caps come back as 429s; they must disable the provider, while
     # the per-minute limit must not.
     daily = Exception("Rate limit reached for model `openai/gpt-oss-120b` on requests per day (RPD): Limit 1000, Used 1000")
-    per_minute = Exception("Rate limit reached for model `openai/gpt-oss-120b` on tokens per minute (TPM): Limit 8000")
+    # Groq's real per-minute message, including its trailing billing upgrade link.
+    per_minute = Exception(
+        "Rate limit reached for model `openai/gpt-oss-20b` in organization `org_x` service tier "
+        "`on_demand` on tokens per minute (TPM): Limit 8000, Used 8000, Requested 1580. Please try "
+        "again in 11.85s. Need more tokens? Upgrade to Dev Tier today at "
+        "https://console.groq.com/settings/billing")
     assert orch._is_quota_exhausted(daily)
     assert not orch._is_quota_exhausted(per_minute)
+    assert orch._is_quota_exhausted(Exception("Insufficient Balance"))
+    # The provider's suggested wait is honoured.
+    assert orch._suggested_wait(per_minute) == 11.85
+    assert orch._suggested_wait(Exception("Please try again in 1m30.5s")) == 90.5
+    assert orch._suggested_wait(Exception("slow down")) is None
     print("PASS: default LLM chain uses current models; daily caps count as exhausted")
 
 
